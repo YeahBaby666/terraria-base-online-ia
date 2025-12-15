@@ -27,13 +27,26 @@ const k = (x, y) => `${Math.floor(x)},${Math.floor(y)}`;
 io.on('connection', (socket) => {
     console.log('Jugador:', socket.id);
 
-    // Spawneamos al jugador en el aire
+    // ... dentro de io.on('connection', socket) ...
+
     players[socket.id] = {
-        x: 0, y: -200, 
-        vx: 0, vy: 0, // Velocidad
-        color: `hsl(${Math.random()*360}, 100%, 50%)`,
-        width: 30, height: 30
+        x: Math.random() * 200 - 100, y: -200,
+        vx: 0, vy: 0,
+        color: `hsl(${Math.random()*360}, 80%, 60%)`,
+        width: 30, height: 30,
+        isBot: false // <--- NUEVO: Por defecto todos son humanos
     };
+
+    // --- NUEVO EVENTO: IDENTIFICACIÓN DE BOTS ---
+    socket.on('soy_bot', () => {
+        if (players[socket.id]) {
+            players[socket.id].isBot = true; // Lo marcamos
+            players[socket.id].color = '#3CB371'; // Color Zombie (Verde)
+            players[socket.id].nombre = "Zombie"; // Opcional
+        }
+    });
+
+// ... resto del código igual ...
 
     // GENERAR PISO INICIAL BAJO EL JUGADOR
     // 5 bloques de ancho justo debajo de donde aparece (y=0)
