@@ -1,137 +1,94 @@
-/**
- * EngineIO SDK
- * Cliente oficial para conectar con servidores EngineIO.
- * * Uso:
- * 1. EngineSDK.init({ serverUrl: 'https://mi-servidor.render.com' });
- * 2. EngineSDK.conectar('nombre-sala', (id) => console.log('Conectado', id));
- */
 (function(global) {
-    
     const EngineSDK = {
-        config: {
-            serverUrl: 'http://localhost:3000', // Valor por defecto para desarrollo local
-            debug: false
-        },
-        
+        config: { serverUrl: 'http://localhost:3000', debug: false },
         socket: null,
         currentRoom: null,
-        lastStateReceived: {},
+        _onEventCallback: null,
+        _onNotifyCallback: null,
 
-        /**
-         * Configura el SDK antes de usarlo.
-         * @param {Object} options - { serverUrl: string, debug: boolean }
-         */
         init: function(options) {
             if (options.serverUrl) this.config.serverUrl = options.serverUrl;
-            if (options.debug) this.config.debug = options.debug;
-            this.log(`SDK Inicializado apuntando a: ${this.config.serverUrl}`);
         },
 
-        log: function(msg) {
-            if (this.config.debug) console.log(`[EngineSDK] ${msg}`);
-        },
-
-        // --- CONEXIÓN ---
-        conectar: function(roomId, onConnect, onDisconnect) {
-            if (typeof io === 'undefined') {
-                console.error("[EngineSDK] Error Crítico: Socket.IO no está cargado. Añade <script src='https://cdn.socket.io/4.7.2/socket.io.min.js'></script>");
-                return;
-            }
-            
-            // Evitar reconexión si ya está conectado a la misma sala
-            if (this.socket && this.socket.connected && this.currentRoom === roomId) {
-                this.log("Ya conectado a esta sala.");
-                if (onConnect) onConnect(this.socket.id);
-                return;
-            }
-
+        conectar: function(roomId, callbacks = {}) {
+            if (typeof io === 'undefined') return console.error("Falta Socket.IO");
             if (this.socket) this.socket.disconnect();
-
-            this.log(`Conectando a ${this.config.serverUrl}...`);
+            
             this.socket = io(this.config.serverUrl);
             this.currentRoom = roomId;
 
             this.socket.on('connect', () => {
-                this.log(`Conexión exitosa. ID: ${this.socket.id}`);
                 this.socket.emit('join_room', roomId);
-                if (onConnect) onConnect(this.socket.id);
+                if (callbacks.onConnect) callbacks.onConnect(this.socket.id);
             });
 
-            this.socket.on('disconnect', () => {
-                this.log("Desconectado.");
-                if (onDisconnect) onDisconnect();
+            this.socket.on('relay_event', (eventData) => {
+                if (this._onEventCallback) this._onEventCallback(eventData);
             });
 
-            this.socket.on('connect_error', (err) => {
-                console.error("[EngineSDK] Error de conexión:", err.message);
+            this.socket.on('notification', (msg) => {
+                if (this._onNotifyCallback) this._onNotifyCallback(msg);
             });
+
+            // RESPUESTA DE BASE DE DATOS
+            this.socket.on('db_response', (res) => {
+                // Buscamos si hay un callback pendiente para este ID de petición
+                if (this._dbCallbacks[res.reqId]) {
+                    this._dbCallbacks[res.reqId](res.data);
+                    delete this._dbCallbacks[res.reqId]; // Limpieza
+                }
+            });
+        },
+
+        onEvent: function(callback) { this._onEventCallback = callback; },
+        sendAction: function(actionName, payload = {}) {
+            if (!this.socket) return;
+            this.socket.emit('data', { action: actionName, ...payload });
+        },
+
+        // --- MÓDULO DE BASE DE DATOS (NUEVO) ---
+        _dbCallbacks: {}, // Cola de callbacks de peticiones pendientes
+
+        db: {
+            // Helper interno para pedir datos
+            _request: function(bucket, key, callback) {
+                if (!EngineSDK.socket) return;
+                const reqId = Date.now().toString(36) + Math.random().toString(36).substr(2);
+                
+                // Guardamos el callback para ejecutarlo cuando vuelva la respuesta
+                EngineSDK._dbCallbacks[reqId] = callback;
+
+                EngineSDK.socket.emit('data', {
+                    action: 'SYS_DB_GET',
+                    reqId: reqId,
+                    bucket: bucket, // 'public' o 'private'
+                    key: key // Si es null, trae todo el JSON
+                });
+            },
+
+            // Helper interno para guardar datos
+            _save: function(bucket, key, value) {
+                if (!EngineSDK.socket) return;
+                EngineSDK.socket.emit('data', {
+                    action: 'SYS_DB_SET',
+                    bucket: bucket,
+                    key: key,
+                    value: value
+                });
+            },
+
+            // API Pública
+            getPublic: function(key, callback) { this._request('public', key, callback); },
+            setPublic: function(key, value) { this._save('public', key, value); },
             
-            // Listeners internos
-            this._setupInternalListeners();
+            getPrivate: function(key, callback) { this._request('private', key, callback); },
+            setPrivate: function(key, value) { this._save('private', key, value); }
         },
 
-        _setupInternalListeners: function() {
-            this.socket.on('game_tick', (state) => {
-                this.lastStateReceived = state;
-            });
-        },
-
-        // --- API DE JUEGO ---
-        alRecibirEstado: function(callback) {
-            if (!this.socket) return;
-            this.socket.on('game_tick', callback);
-        },
-
-        enviarInput: function(roomId, type, data) {
-            if (!this.socket) return;
-            this.socket.emit('input_data', { 
-                roomId: roomId, 
-                payload: { type: type, ...data } 
-            });
-        },
-
-        // --- HERRAMIENTAS DE INTROSPECCIÓN ---
-        obtenerEsquema: function() {
-            const keys = Object.keys(this.lastStateReceived);
-            const schema = {};
-            keys.forEach(k => {
-                const val = this.lastStateReceived[k];
-                let type = typeof val;
-                if (Array.isArray(val)) type = 'Array';
-                let preview = (type === 'object' && val !== null) ? '{...}' : String(val).substring(0, 30);
-                schema[k] = { type, preview };
-            });
-            return schema;
-        },
-
-        // --- PERSISTENCIA (SUPABASE VIA SOCKET) ---
-        guardar: function(type, content, extra = {}) {
-            if (!this.socket || !this.currentRoom) return;
-            this.socket.emit('persist_save', {
-                roomId: this.currentRoom, 
-                type: type, 
-                content: content,
-                extra: extra 
-            });
-        },
-
-        cargar: function(type, callback) {
-            if (!this.socket || !this.currentRoom) return;
-            this.socket.emit('persist_load', { roomId: this.currentRoom, type });
-            this.socket.once('persist_loaded', (res) => {
-                if (res.type === type) callback(res.content);
-            });
-        },
-        
-        // --- UTILIDADES ---
-        desconectar: function() {
-            if (this.socket) this.socket.disconnect();
-            this.socket = null;
-            this.currentRoom = null;
-        }
+        // Métodos Legacy (Compatibilidad)
+        guardar: function(type, content, extra) { this.sendAction('SYS_SAVE', { type, content, extra }); },
+        desconectar: function() { if (this.socket) this.socket.disconnect(); }
     };
 
-    // Exponer globalmente
     global.EngineSDK = EngineSDK;
-
 })(window);

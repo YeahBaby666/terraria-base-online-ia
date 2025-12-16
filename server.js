@@ -3,165 +3,139 @@ const http = require('http');
 const { Server } = require("socket.io");
 const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
-const vm = require('vm');
 
 // --- CONFIGURACIÓN ---
-const SUPABASE_URL = process.env.SUPABASE_URL || 'TU_SUPABASE_URL';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'TU_SUPABASE_KEY';
+const SUPABASE_URL = process.env.SUPABASE_URL || 'TU_URL_AQUI';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || 'TU_KEY_AQUI';
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 const app = express();
 app.use(cors());
-
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-// --- CLASE GAMEROOM (LÓGICA) ---
-class GameRoom {
-    constructor(roomId, ioInstance) {
-        this.id = roomId;
-        this.io = ioInstance;
-        // Estado inicial limpio
-        this.state = { 
-            players: {}, 
-            tick: 0 
-        };
-        this.inputsQueue = []; 
-        
-        // Memoria de teclas presionadas por cada jugador (Para movimiento fluido)
-        this.playerInputs = {}; 
-
-        console.log(`[SALA] Iniciada: ${this.id}`);
-        this.restoreFromDb().then(() => this.startGameLoop());
-    }
-
-    async restoreFromDb() {
-        const { data } = await supabase.from('room_storage').select('public_state').eq('room_id', this.id).single();
-        if (data?.public_state) {
-            this.state = { ...this.state, ...data.public_state };
-            // Limpiamos jugadores viejos de la DB al reiniciar para evitar fantasmas
-            this.state.players = {}; 
-        }
-    }
-
-    addPlayer(socketId) {
-        // Inicializamos input vacío para este jugador
-        this.playerInputs[socketId] = { keys: [] };
-        // El jugador real se crea en la lógica del usuario (VM), aquí solo preparamos
-    }
-
-    removePlayer(socketId) {
-        if (this.state.players && this.state.players[socketId]) {
-            delete this.state.players[socketId];
-        }
-        delete this.playerInputs[socketId];
-    }
-
-    pushInput(socketId, payload) {
-        // Actualizamos el estado de teclas actual de este jugador
-        if (payload.type === 'MOVE') {
-            this.playerInputs[socketId] = payload; // Guardamos { keys: ['w', 'a'] }
-        }
-        
-        // También pasamos el evento crudo a la lógica por si quiere disparar acciones únicas (saltar, disparar)
-        this.inputsQueue.push({ senderId: socketId, ...payload });
-    }
-
-    startGameLoop() {
-        // Cargar código de la sala
-        this.logicCode = "";
-        supabase.from('game_rooms').select('server_logic').eq('id', this.id).single()
-            .then(({ data }) => { if(data) this.logicCode = data.server_logic; });
-
-        setInterval(() => {
-            if (Object.keys(this.state.players).length === 0 && this.inputsQueue.length === 0) return;
-
-            try {
-                // SANDBOX: Le pasamos 'activeInputs' para movimiento fluido
-                const sandbox = {
-                    state: this.state,
-                    inputs: this.inputsQueue,      // Eventos únicos (disparos, clicks)
-                    activeInputs: this.playerInputs, // Estado mantenido (teclas presionadas)
-                    Math: Math,
-                    console: { log: () => {} }
-                };
-
-                vm.createContext(sandbox);
-                // Si hay lógica personalizada, usarla. Si no, usar default seguro.
-                const codeToRun = this.logicCode || `
-                    // Lógica Default de Emergencia
-                    Object.keys(activeInputs).forEach(id => {
-                        if(!state.players[id]) state.players[id] = { x: 100, y: 100, color: 'cyan' };
-                        const keys = activeInputs[id].keys || [];
-                        const p = state.players[id];
-                        if(keys.includes('ArrowRight')) p.x += 5;
-                        if(keys.includes('ArrowLeft')) p.x -= 5;
-                        if(keys.includes('ArrowUp')) p.y -= 5;
-                        if(keys.includes('ArrowDown')) p.y += 5;
-                    });
-                `;
-                
-                vm.runInContext(codeToRun, sandbox);
-
-                this.state = sandbox.state;
-                this.inputsQueue = []; // Limpiar cola de eventos únicos
-                this.state.tick++;
-
-                this.io.to(this.id).emit('game_tick', this.state);
-
-            } catch (e) {
-                console.error(`Error en sala ${this.id}:`, e.message);
-            }
-        }, 1000 / 60); // 60 FPS
-    }
-
-    updateLogic(newCode) {
-        this.logicCode = newCode;
-    }
-}
-
-// --- GESTOR DE CONEXIONES ---
 const activeRooms = {}; 
 
 io.on('connection', (socket) => {
-    // console.log(`[+] ${socket.id}`);
     
-    // Mapeo rápido para saber en qué sala está el socket al desconectarse
-    socket.roomId = null; 
-
-    socket.on('join_room', (roomId) => {
+    socket.on('join_room', async (roomId) => {
+        if (socket.currentRoom) leaveRoom(socket);
         socket.join(roomId);
-        socket.roomId = roomId;
+        socket.currentRoom = roomId;
 
-        if (!activeRooms[roomId]) {
-            activeRooms[roomId] = new GameRoom(roomId, io);
-        }
-        activeRooms[roomId].addPlayer(socket.id);
+        if (!activeRooms[roomId]) activeRooms[roomId] = { users: 0 };
+        activeRooms[roomId].users++;
+
+        // Carga inicial opcional (para compatibilidad con lógica anterior)
+        const { data } = await supabase.from('room_storage').select('public_state').eq('room_id', roomId).single();
+        if (data?.public_state) socket.emit('init_state', data.public_state);
     });
 
-    socket.on('input_data', ({ roomId, payload }) => {
-        if (activeRooms[roomId]) {
-            activeRooms[roomId].pushInput(socket.id, payload);
+    socket.on('data', (packet) => {
+        const roomId = socket.currentRoom;
+        if (!roomId) return;
+
+        const { action, ...payload } = packet;
+
+        // --- A. ACCIONES DE BASE DE DATOS (NUEVO) ---
+        if (action === 'SYS_DB_GET') {
+            handleDbGet(roomId, payload, socket);
+            return;
         }
+        if (action === 'SYS_DB_SET') {
+            handleDbSet(roomId, payload);
+            return;
+        }
+
+        // --- B. ACCIONES DE SISTEMA LEGACY ---
+        if (action === 'SYS_SAVE') {
+            handleLegacySave(roomId, payload, socket);
+            return;
+        }
+
+        // --- C. RELAY (JUEGO) ---
+        io.to(roomId).emit('relay_event', { senderId: socket.id, action: action || 'UNKNOWN', ...payload });
     });
 
-    socket.on('update_code', ({ roomId, logicCode }) => {
-        if (activeRooms[roomId]) {
-            activeRooms[roomId].updateLogic(logicCode);
-            io.to(roomId).emit('notification', 'Lógica Actualizada');
-        }
-    });
-
-    socket.on('persist_save', async (data) => { /* ... lógica de guardado anterior ... */ });
-
-    socket.on('disconnect', () => {
-        const rId = socket.roomId;
-        if (rId && activeRooms[rId]) {
-            activeRooms[rId].removePlayer(socket.id);
-            // console.log(`[-] ${socket.id} salió de ${rId}`);
-        }
-    });
+    socket.on('disconnect', () => leaveRoom(socket));
 });
 
+// --- MANEJADORES DE DB ---
+
+async function handleDbGet(roomId, payload, socket) {
+    const { bucket, key, reqId } = payload;
+    // Mapeo: 'public' -> public_state, 'private' -> private_data
+    const column = bucket === 'public' ? 'public_state' : 'private_data';
+
+    const { data } = await supabase
+        .from('room_storage')
+        .select(column)
+        .eq('room_id', roomId)
+        .single();
+
+    let result = null;
+    if (data && data[column]) {
+        // Si piden una key especifica, devolvemos solo eso. Si no, todo el JSON.
+        result = key ? data[column][key] : data[column];
+    }
+
+    // Responder solo al que preguntó
+    socket.emit('db_response', { reqId, data: result });
+}
+
+async function handleDbSet(roomId, payload) {
+    const { bucket, key, value } = payload;
+    const column = bucket === 'public' ? 'public_state' : 'private_data';
+
+    // 1. Obtener JSON actual para no borrar otras claves
+    const { data } = await supabase
+        .from('room_storage')
+        .select(column)
+        .eq('room_id', roomId)
+        .single();
+
+    let currentJson = (data && data[column]) ? data[column] : {};
+
+    // 2. Actualizar o Insertar
+    if (key) {
+        // Actualizar una clave específica (ej: 'users')
+        currentJson[key] = value;
+    } else if (typeof value === 'object') {
+        // Fusionar objeto completo
+        currentJson = { ...currentJson, ...value };
+    }
+
+    // 3. Guardar en BD
+    const updateData = {};
+    updateData[column] = currentJson;
+    
+    await supabase
+        .from('room_storage')
+        .upsert({ room_id: roomId, ...updateData, updated_at: new Date() });
+    
+    // Opcional: Notificar a la sala que hubo un cambio en DB (Live update)
+    // io.to(roomId).emit('relay_event', { action: 'DB_UPDATE', bucket, key, value });
+}
+
+function leaveRoom(socket) {
+    const roomId = socket.currentRoom;
+    if (roomId && activeRooms[roomId]) {
+        activeRooms[roomId].users--;
+        io.to(roomId).emit('relay_event', { senderId: socket.id, action: 'DISCONNECT' });
+    }
+}
+
+async function handleLegacySave(roomId, payload, socket) {
+    // ... lógica anterior de guardado html/state ...
+    const { type, content, extra } = payload;
+    const update = {};
+    if (type === 'html') {
+        update.client_html = content;
+        if(extra?.creator) update.creator_name = extra.creator;
+        await supabase.from('game_rooms').update(update).eq('id', roomId);
+    } 
+    socket.emit('notification', 'Guardado OK');
+}
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Engine Server v2 running on ${PORT}`));
+server.listen(PORT, () => console.log(`Server v4 (DB API) running on ${PORT}`));
