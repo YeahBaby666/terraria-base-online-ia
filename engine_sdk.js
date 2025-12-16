@@ -1,10 +1,15 @@
 (function(global) {
+    
     const EngineSDK = {
-        config: { serverUrl: 'http://localhost:3000', debug: false },
+        config: { serverUrl: 'http://localhost:3000' },
         socket: null,
         currentRoom: null,
-        _onEventCallback: null,
-        _onNotifyCallback: null,
+        
+        // ESTADO LOCAL (La verdad del cliente)
+        localState: {
+            players: {},
+            global: {}
+        },
 
         init: function(options) {
             if (options.serverUrl) this.config.serverUrl = options.serverUrl;
@@ -20,75 +25,110 @@
             this.socket.on('connect', () => {
                 this.socket.emit('join_room', roomId);
                 if (callbacks.onConnect) callbacks.onConnect(this.socket.id);
+                // Iniciar bucle visual local
+                this._startRenderLoop();
             });
 
-            this.socket.on('relay_event', (eventData) => {
-                if (this._onEventCallback) this._onEventCallback(eventData);
+            // 1. CARGA INICIAL
+            this.socket.on('init_state', (serverState) => {
+                // Fusión profunda simple
+                this.localState = { ...this.localState, ...serverState };
+                if(!this.localState.players) this.localState.players = {};
+            });
+
+            // 2. RECEPCIÓN DE EVENTOS (RELAY)
+            this.socket.on('relay_event', (packet) => {
+                this._processPacket(packet);
             });
 
             this.socket.on('notification', (msg) => {
-                if (this._onNotifyCallback) this._onNotifyCallback(msg);
-            });
-
-            // RESPUESTA DE BASE DE DATOS
-            this.socket.on('db_response', (res) => {
-                // Buscamos si hay un callback pendiente para este ID de petición
-                if (this._dbCallbacks[res.reqId]) {
-                    this._dbCallbacks[res.reqId](res.data);
-                    delete this._dbCallbacks[res.reqId]; // Limpieza
-                }
+                if (window.alert && msg.includes('Error')) window.alert(msg);
+                console.log('[SERVER]:', msg);
             });
         },
 
-        onEvent: function(callback) { this._onEventCallback = callback; },
-        sendAction: function(actionName, payload = {}) {
-            if (!this.socket) return;
-            this.socket.emit('data', { action: actionName, ...payload });
-        },
+        /**
+         * PROCESAMIENTO INTERNO DE PAQUETES
+         */
+        _processPacket: function(packet) {
+            const { senderId, action, targetId, ...data } = packet;
 
-        // --- MÓDULO DE BASE DE DATOS (NUEVO) ---
-        _dbCallbacks: {}, // Cola de callbacks de peticiones pendientes
+            // A. FILTRO DE PRIVACIDAD
+            // Si el mensaje tiene un destinatario y NO soy yo, lo ignoro.
+            if (targetId && targetId !== this.socket.id) {
+                return; 
+            }
 
-        db: {
-            // Helper interno para pedir datos
-            _request: function(bucket, key, callback) {
-                if (!EngineSDK.socket) return;
-                const reqId = Date.now().toString(36) + Math.random().toString(36).substr(2);
-                
-                // Guardamos el callback para ejecutarlo cuando vuelva la respuesta
-                EngineSDK._dbCallbacks[reqId] = callback;
+            // B. GESTIÓN DE DESCONEXIÓN
+            if (action === 'DISCONNECT') {
+                delete this.localState.players[senderId];
+                return;
+            }
 
-                EngineSDK.socket.emit('data', {
-                    action: 'SYS_DB_GET',
-                    reqId: reqId,
-                    bucket: bucket, // 'public' o 'private'
-                    key: key // Si es null, trae todo el JSON
-                });
-            },
+            // C. ACTUALIZACIÓN DE ESTADO
+            // Si no existe el jugador, se crea
+            if (!this.localState.players[senderId]) {
+                this.localState.players[senderId] = {};
+            }
 
-            // Helper interno para guardar datos
-            _save: function(bucket, key, value) {
-                if (!EngineSDK.socket) return;
-                EngineSDK.socket.emit('data', {
-                    action: 'SYS_DB_SET',
-                    bucket: bucket,
-                    key: key,
-                    value: value
-                });
-            },
-
-            // API Pública
-            getPublic: function(key, callback) { this._request('public', key, callback); },
-            setPublic: function(key, value) { this._save('public', key, value); },
+            // Mezclamos los datos nuevos con los que ya teníamos
+            const player = this.localState.players[senderId];
+            Object.assign(player, data);
             
-            getPrivate: function(key, callback) { this._request('private', key, callback); },
-            setPrivate: function(key, value) { this._save('private', key, value); }
+            // Metadatos útiles para el renderizador
+            player.id = senderId;
+            player.lastAction = action; 
         },
 
-        // Métodos Legacy (Compatibilidad)
-        guardar: function(type, content, extra) { this.sendAction('SYS_SAVE', { type, content, extra }); },
+        // --- BUCLE DE RENDERIZADO LOCAL (60 FPS) ---
+        _renderLoopId: null,
+        _startRenderLoop: function() {
+            if (this._renderLoopId) cancelAnimationFrame(this._renderLoopId);
+            
+            const loop = () => {
+                if (this._onTickCallback) {
+                    // Le pasamos el estado local al usuario para que dibuje
+                    this._onTickCallback(this.localState);
+                }
+                this._renderLoopId = requestAnimationFrame(loop);
+            };
+            this._renderLoopId = requestAnimationFrame(loop);
+        },
+
+        // --- API PÚBLICA ---
+
+        onTick: function(callback) {
+            this._onTickCallback = callback;
+        },
+
+        /**
+         * Envía datos a la sala.
+         * @param {string} actionName - Nombre del evento ('MOVE', 'DRAW', etc)
+         * @param {object} payload - Datos (x, y, color). 
+         * @param {string} targetId - (Opcional) ID de socket privado.
+         */
+        sendAction: function(actionName, payload = {}, targetId = null) {
+            if (!this.socket) return;
+            
+            const packet = { 
+                action: actionName, 
+                targetId: targetId,
+                ...payload 
+            };
+            
+            this.socket.emit('data', packet);
+        },
+
+        // Métodos de Sistema
+        guardar: function(type, content, extra) {
+            this.socket.emit('data', { action: 'SYS_SAVE', type, content, extra });
+        },
+        
+        obtenerEsquema: function() { return this.localState; },
+        obtenerMiId: function() { return this.socket ? this.socket.id : null; },
         desconectar: function() { if (this.socket) this.socket.disconnect(); }
     };
 
     global.EngineSDK = EngineSDK;
+
 })(window);

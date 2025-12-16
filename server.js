@@ -14,128 +14,86 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
-const activeRooms = {}; 
+// --- MEMORIA DE ESTADO (Solo para nuevos usuarios) ---
+const roomStates = {}; 
 
 io.on('connection', (socket) => {
     
+    // 1. UNIRSE
     socket.on('join_room', async (roomId) => {
-        if (socket.currentRoom) leaveRoom(socket);
         socket.join(roomId);
         socket.currentRoom = roomId;
 
-        if (!activeRooms[roomId]) activeRooms[roomId] = { users: 0 };
-        activeRooms[roomId].users++;
+        // Recuperar estado previo si no está en RAM
+        if (!roomStates[roomId]) {
+            roomStates[roomId] = { players: {}, global: {} };
+            const { data } = await supabase.from('room_storage').select('public_state').eq('room_id', roomId).single();
+            if (data?.public_state) {
+                roomStates[roomId] = { ...roomStates[roomId], ...data.public_state };
+            }
+        }
 
-        // Carga inicial opcional (para compatibilidad con lógica anterior)
-        const { data } = await supabase.from('room_storage').select('public_state').eq('room_id', roomId).single();
-        if (data?.public_state) socket.emit('init_state', data.public_state);
+        // Enviar estado actual SOLO al que entra
+        socket.emit('init_state', roomStates[roomId]);
     });
 
+    // 2. DATA RELAY (Tubería principal)
     socket.on('data', (packet) => {
         const roomId = socket.currentRoom;
         if (!roomId) return;
 
-        const { action, ...payload } = packet;
+        const { action, targetId, ...payload } = packet;
 
-        // --- A. ACCIONES DE BASE DE DATOS (NUEVO) ---
-        if (action === 'SYS_DB_GET') {
-            handleDbGet(roomId, payload, socket);
-            return;
-        }
-        if (action === 'SYS_DB_SET') {
-            handleDbSet(roomId, payload);
-            return;
-        }
-
-        // --- B. ACCIONES DE SISTEMA LEGACY ---
+        // A. ACCIONES DE SISTEMA
         if (action === 'SYS_SAVE') {
-            handleLegacySave(roomId, payload, socket);
+            handleSave(roomId, payload, socket);
             return;
         }
 
-        // --- C. RELAY (JUEGO) ---
-        io.to(roomId).emit('relay_event', { senderId: socket.id, action: action || 'UNKNOWN', ...payload });
+        // B. ACTUALIZAR MEMORIA DEL SERVIDOR (Fusión simple)
+        // Para que si entra alguien nuevo, vea lo último.
+        // Nota: No ejecutamos lógica, solo guardamos el dato crudo bajo el ID.
+        if (roomStates[roomId] && roomStates[roomId].players) {
+            if (!roomStates[roomId].players[socket.id]) {
+                roomStates[roomId].players[socket.id] = {};
+            }
+            // Mezclar datos nuevos con los existentes
+            Object.assign(roomStates[roomId].players[socket.id], payload);
+        }
+
+        // C. BROADCAST A TODOS (Incluido remitente)
+        // El SDK del cliente se encargará de filtrar si es privado.
+        io.to(roomId).emit('relay_event', {
+            senderId: socket.id,
+            action: action || 'UPDATE',
+            targetId: targetId || null, // Si lleva destino, lo pasamos
+            ...payload
+        });
     });
 
-    socket.on('disconnect', () => leaveRoom(socket));
+    // 3. DESCONEXIÓN
+    socket.on('disconnect', () => {
+        const roomId = socket.currentRoom;
+        if (roomId && roomStates[roomId]?.players[socket.id]) {
+            delete roomStates[roomId].players[socket.id];
+            io.to(roomId).emit('relay_event', { senderId: socket.id, action: 'DISCONNECT' });
+        }
+    });
 });
 
-// --- MANEJADORES DE DB ---
-
-async function handleDbGet(roomId, payload, socket) {
-    const { bucket, key, reqId } = payload;
-    // Mapeo: 'public' -> public_state, 'private' -> private_data
-    const column = bucket === 'public' ? 'public_state' : 'private_data';
-
-    const { data } = await supabase
-        .from('room_storage')
-        .select(column)
-        .eq('room_id', roomId)
-        .single();
-
-    let result = null;
-    if (data && data[column]) {
-        // Si piden una key especifica, devolvemos solo eso. Si no, todo el JSON.
-        result = key ? data[column][key] : data[column];
-    }
-
-    // Responder solo al que preguntó
-    socket.emit('db_response', { reqId, data: result });
-}
-
-async function handleDbSet(roomId, payload) {
-    const { bucket, key, value } = payload;
-    const column = bucket === 'public' ? 'public_state' : 'private_data';
-
-    // 1. Obtener JSON actual para no borrar otras claves
-    const { data } = await supabase
-        .from('room_storage')
-        .select(column)
-        .eq('room_id', roomId)
-        .single();
-
-    let currentJson = (data && data[column]) ? data[column] : {};
-
-    // 2. Actualizar o Insertar
-    if (key) {
-        // Actualizar una clave específica (ej: 'users')
-        currentJson[key] = value;
-    } else if (typeof value === 'object') {
-        // Fusionar objeto completo
-        currentJson = { ...currentJson, ...value };
-    }
-
-    // 3. Guardar en BD
-    const updateData = {};
-    updateData[column] = currentJson;
-    
-    await supabase
-        .from('room_storage')
-        .upsert({ room_id: roomId, ...updateData, updated_at: new Date() });
-    
-    // Opcional: Notificar a la sala que hubo un cambio en DB (Live update)
-    // io.to(roomId).emit('relay_event', { action: 'DB_UPDATE', bucket, key, value });
-}
-
-function leaveRoom(socket) {
-    const roomId = socket.currentRoom;
-    if (roomId && activeRooms[roomId]) {
-        activeRooms[roomId].users--;
-        io.to(roomId).emit('relay_event', { senderId: socket.id, action: 'DISCONNECT' });
-    }
-}
-
-async function handleLegacySave(roomId, payload, socket) {
-    // ... lógica anterior de guardado html/state ...
+async function handleSave(roomId, payload, socket) {
     const { type, content, extra } = payload;
-    const update = {};
     if (type === 'html') {
-        update.client_html = content;
+        const update = { client_html: content };
         if(extra?.creator) update.creator_name = extra.creator;
         await supabase.from('game_rooms').update(update).eq('id', roomId);
-    } 
-    socket.emit('notification', 'Guardado OK');
+    } else if (type === 'state') {
+        // Guardamos lo que tenemos en memoria RAM actualmente
+        const stateToSave = roomStates[roomId] || content;
+        await supabase.from('room_storage').upsert({ room_id: roomId, public_state: stateToSave, updated_at: new Date() });
+    }
+    socket.emit('notification', 'Guardado en Nube OK');
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server v4 (DB API) running on ${PORT}`));
+server.listen(PORT, () => console.log(`Server Relay Puro corriendo en ${PORT}`));
