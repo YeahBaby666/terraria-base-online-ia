@@ -1,5 +1,5 @@
 {
-  "name": "completo",
+  "name": "js",
   "version": "1.0.0",
   "description": "",
   "main": "server.js",
@@ -11,10 +11,11 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
-    "@supabase/supabase-js": "^2.87.2",
+    "@google/genai": "^1.34.0",
+    "@supabase/supabase-js": "^2.88.0",
     "cors": "^2.8.5",
     "express": "^5.2.1",
-    "socket.io": "^4.8.1"
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
   }
 }
