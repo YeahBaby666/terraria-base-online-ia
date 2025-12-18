@@ -437,7 +437,7 @@ io.on("connection", async (socket) => {
           }
 
           // 2. CICLO UPDATE (Física global)
-          if (r.logic.onUpdate) r.logic.onUpdate(r.state, 0.033);
+          if (r.logic.onUpdate) r.logic.onUpdate(r.state, 0.016);
 
           // 3. CICLO DE BOTS (IA -> INPUT)
           if (r.logic.onBot && r.logic.onInput) {
