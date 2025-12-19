@@ -74,8 +74,7 @@ class RenderCore {
             // Empaquetado CRUDO: 't' en lugar de sprite
             const visual = { id: ent.id, t: config.sprite };
 
-            // Asignar tipo visual (t o sprite)
-            visual[K.type] = config.sprite;
+            
 
             // Copiar propiedades numéricas con redondeo
             for (const prop of config.props) {
