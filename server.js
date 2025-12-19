@@ -370,7 +370,8 @@ const createGameContext = (state, renderSys, network) => {
       groupsToScan.forEach((groupName) => {
         const list = state[groupName];
         if (!list || !Array.isArray(list)) return;
-
+// --- CORRECCIÓN AQUÍ: Declaramos la variable contador ---
+            let deliveredCount = 0;
         for (const receiver of list) {
           if (receiver._dead) continue;
 
@@ -389,6 +390,7 @@ const createGameContext = (state, renderSys, network) => {
             receiver.channels.in.includes(channelName)
           ) {
             receiver._receive(type, data);
+            deliveredCount++; // <--- Incrementamos el contador
           }
           if (!sender && deliveredCount > 0) {
             console.log(
