@@ -612,14 +612,21 @@ io.on("connection", async (socket) => {
       });
     }
 
-    // 2. Desempaquetar Acciones (Disparos, skills, etc.)
+    // 2. Acciones (FIX CRÍTICO AQUÍ)
     if (packet.actions && Array.isArray(packet.actions)) {
       for (const action of packet.actions) {
-        // action viene como: { type: 'shoot', payload: { ... } }
-        // Lo aplanamos para el VM: { type: 'shoot', id: '...', ...payload }
+        
+        // Verificamos si payload es un objeto o un primitivo
+        let data = {};
+        if (action.payload && typeof action.payload === 'object') {
+             data = action.payload; // Es objeto, usamos spread
+        } else {
+             data = { value: action.payload }; // Es texto/número, lo envolvemos
+        }
+
         r.inputQueue.push({
           type: action.type,
-          ...action.payload,
+          ...data,       // Ahora data siempre es un objeto seguro
           id: playerId,
         });
       }
