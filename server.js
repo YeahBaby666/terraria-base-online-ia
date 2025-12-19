@@ -249,85 +249,43 @@ const createChannelArray = (initialList) => {
 // ====================================================================
 // --- 2. GAME CONTEXT & SANDBOX (CORREGIDO: DEEP COPIES & FACTORY) ---
 // ====================================================================
-// ====================================================================
-// --- ACTOR HYDRATOR (EL REANIMADOR DE ENTIDADES) ---
-// ====================================================================
-const ActorHydrator = {
-  // Vincula la lógica a un objeto plano recuperado de la DB
-  hydrate: (entity, definitions, dispatchFn) => {
-    if (!entity || !entity._type) return;
 
-    const template = definitions.get(entity._type);
-    if (!template) return;
-
-    // 1. Restaurar _receive (Independiente para cada instancia)
-    entity._receive = (type, data) => {
-      // Buscamos en la lógica de la definición (el cerebro)
-      if (template.logic && template.logic[type]) {
-        template.logic[type](entity, data);
-      }
-    };
-
-    // 2. Restaurar emit (Independiente)
-    entity.emit = (type, data, target) =>
-      dispatchFn(entity, type, data, target);
-
-    // 3. Asegurar que los canales sean arrays (independencia)
-    if (entity.channels) {
-      if (!Array.isArray(entity.channels.in)) entity.channels.in = [];
-      if (!Array.isArray(entity.channels.out)) entity.channels.out = [];
-    }
-  },
-};
 const createGameContext = (state, renderSys, network) => {
+  // MEMORIA DE ALTO RENDIMIENTO (Fuera del State JSON)
+  const EngineGroups = new Map();
   const definitions = new Map();
 
-  // --- DISPATCHER ---
-  const dispatchMessage = (sender, type, data, explicitTarget) => {
-    let targetChannels = [];
-    if (explicitTarget) {
-      if (
-        !sender ||
-        (sender.channels && sender.channels.out.includes(explicitTarget))
-      ) {
-        targetChannels = [explicitTarget];
-      }
-    } else if (sender && sender.channels) {
-      targetChannels = sender.channels.out;
-    }
+  // --- UTILS: DEEP COPY ---
+  const clone = (obj) => JSON.parse(JSON.stringify(obj));
 
-    targetChannels.forEach((channelName) => {
-      // Buscamos en todos los grupos del state
-      Object.keys(state).forEach((groupName) => {
-        const list = state[groupName];
-        if (!Array.isArray(list)) return;
-
-        for (const receiver of list) {
-          if (receiver._dead) continue;
-          // Sincronización al vuelo: si perdió la lógica por la DB, se la re-inyectamos
-          if (typeof receiver._receive !== "function") {
-            syncEntity(receiver);
-          }
-
-          if (receiver.channels?.in?.includes(channelName)) {
-            receiver._receive(type, data);
-          }
-        }
-      });
+  // --- SINCRONIZADOR DE GRUPO (Engine -> State) ---
+  const syncToState = (groupName) => {
+    if (!EngineGroups.has(groupName)) return;
+    // Solo pasamos al state los datos necesarios para el Render/DB
+    state[groupName] = EngineGroups.get(groupName).map((actor) => {
+      const { _receive, emit, ...data } = actor; // Quitamos funciones
+      return data;
     });
   };
 
-  // --- HELPER DE SINCRONIZACIÓN (HYDRATE) ---
-  const syncEntity = (entity) => {
-    const def = definitions.get(entity._type);
-    if (!def) return;
+  const dispatchMessage = (sender, type, data, explicitTarget) => {
+    // Buscamos en los EngineGroups (Memoria viva)
+    EngineGroups.forEach((actors, groupName) => {
+      // Si hay target explícito y no es este grupo, saltar
+      if (explicitTarget && explicitTarget !== groupName) return;
 
-    // Inyectamos las funciones que el JSON no puede guardar
-    entity._receive = (type, data) => {
-      if (def.logic && def.logic[type]) def.logic[type](entity, data);
-    };
-    entity.emit = (type, data, target) =>
-      dispatchMessage(entity, type, data, target);
+      for (const receiver of actors) {
+        if (receiver._dead) continue;
+
+        // Filtro de canal
+        if (
+          receiver.channels?.in?.includes(explicitTarget || groupName) ||
+          !explicitTarget
+        ) {
+          if (receiver._receive) receiver._receive(type, data);
+        }
+      }
+    });
   };
   return {
     layer: (g, s) => layers.set(g, new UniverseCore(s)),
@@ -349,51 +307,64 @@ const createGameContext = (state, renderSys, network) => {
       define: (typeName, config, logic) => {
         definitions.set(typeName, { config, logic });
       },
-      create: (typeName, instConfig, customLogic) => {
+      create: (typeName, instConfig) => {
         const def = definitions.get(typeName);
         if (!def) return;
 
-        // Construcción de la instancia única
+        // 1. CLONACIÓN REAL (Independencia total de referencia)
+        const baseVars = def.config.vars ? clone(def.config.vars) : {};
+        const instVars = instConfig.vars ? clone(instConfig.vars) : {};
+        const baseChannels = def.config.channels
+          ? clone(def.config.channels)
+          : { in: [], out: [] };
+
         const entity = {
           id: Math.random().toString(36).substr(2, 9),
           _type: typeName,
           _dead: false,
           x: instConfig.x || 0,
           y: instConfig.y || 0,
-          ...(def.config.vars || {}),
-          ...(instConfig.vars || {}),
+          ...baseVars,
+          ...instVars,
           channels: {
-            in: [...(instConfig.channels?.in || def.config.channels?.in || [])],
-            out: [
-              ...(instConfig.channels?.out || def.config.channels?.out || []),
-            ],
+            in: [...(instConfig.channels?.in || baseChannels.in || [])],
+            out: [...(instConfig.channels?.out || baseChannels.out || [])],
           },
         };
 
-        // Si se pasa una lógica personalizada (mutante), se usa esa, si no la del define
-        const activeLogic = customLogic || def.logic;
-
-        // Vinculación de métodos
+        // 2. VINCULACIÓN DE LÓGICA (Solo en Engine)
         entity._receive = (type, data) => {
-          if (activeLogic && activeLogic[type]) activeLogic[type](entity, data);
+          if (def.logic && def.logic[type]) def.logic[type](entity, data);
         };
         entity.emit = (type, data, target) =>
           dispatchMessage(entity, type, data, target);
 
-        const group = instConfig.group || def.config.group || "default";
-        if (!state[group]) state[group] = [];
-        state[group].push(entity);
+        // 3. REGISTRO EN ENGINE
+        const gName = instConfig.group || def.config.group || "default";
+        if (!EngineGroups.has(gName)) EngineGroups.set(gName, []);
+        EngineGroups.get(gName).push(entity);
+
         return entity;
       },
       // ESTA ES LA FUNCIÓN QUE FALTA:
-        destroy: (entity) => {
-            if (entity) entity._dead = true;
-        }
+      destroy: (entity) => {
+        if (entity) entity._dead = true;
+      },
     },
-        // --- AQUÍ ESTÁ EL CAMBIO DE ORDEN ---
+    // --- AQUÍ ESTÁ EL CAMBIO DE ORDEN ---
     // Ahora es igual que me.emit: (TIPO, DATA, TARGET)
     emit: (type, data, targetGroup) => {
       dispatchMessage(null, type, data, targetGroup);
+    },
+    // --- ESTA FUNCIÓN SE LLAMA AL FINAL DEL LOOP ---
+    updateStateMirror: () => {
+      EngineGroups.forEach((actors, gName) => {
+        // Limpieza de muertos en Engine
+        const alive = actors.filter((a) => !a._dead);
+        EngineGroups.set(gName, alive);
+        // Volcado a State para persistencia y render
+        syncToState(gName);
+      });
     },
     Render: {
       type: (n, c) => renderSys.setup(n, c),
