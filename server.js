@@ -34,17 +34,15 @@ const rooms = {};
 // --- 1. MOTORES DEL NÚCLEO (ARQUITECTURA DE CAPAS) ---
 // ====================================================================
 
-/** RENDER CORE: Gestor de Vista basado en Configuración */
+/** RENDER CORE: Gestor de Vista (Versión Estable) */
 class RenderCore {
   constructor() {
     this.configs = new Map();
     this.globals = {};
     this.rounding = 1;
-
-    // --- NUEVO: CONFIGURACIÓN DE MODO ---
     this.debugMode = false; // Por defecto optimizado
 
-    // Diccionarios de traducción
+    // Diccionarios de traducción (DEFINIDOS EN EL CONSTRUCTOR)
     this.KEYS = {
       PROD: { pack: "e", global: "g", effect: "fx", type: "t" },
       DEV: {
@@ -66,56 +64,70 @@ class RenderCore {
     });
   }
 
-  // --- NUEVO: Función para cambiar el modo ---
-  setDebug(isEnabled) {
-    this.debugMode = isEnabled;
-  }
-
   setGlobal(key, value) {
     this.globals[key] = value;
   }
 
+  setDebug(isEnabled) {
+    this.debugMode = !!isEnabled; // Forzar booleano
+  }
+
   processSnapshot(state, effects) {
-    // 1. Seleccionar el diccionario según el modo
-    const K = this.debugMode ? this.KEYS.DEV : this.KEYS.PROD;
-    const entitiesPacket = [];
-    this.configs.forEach((config, typeName) => {
-      const groupName = config.group;
-      if (state[groupName]) {
-        const collection = Array.isArray(state[groupName])
-          ? state[groupName]
-          : Object.values(state[groupName]);
+    try {
+      // 1. Seleccionar claves según modo
+      const K = this.debugMode ? this.KEYS.DEV : this.KEYS.PROD;
+      const entitiesPacket = [];
 
-        for (const ent of collection) {
-          if (ent._dead) continue;
+      this.configs.forEach((config, typeName) => {
+        const groupName = config.group;
 
-          // USAMOS LA CLAVE DINÁMICA PARA EL TIPO (t vs sprite)
-          const visual = { id: ent.id };
-          visual[K.type] = config.sprite;
+        if (state[groupName]) {
+          const collection = Array.isArray(state[groupName])
+            ? state[groupName]
+            : Object.values(state[groupName]);
 
-          for (const prop of config.props) {
-            const val = ent[prop];
-            visual[prop] =
-              typeof val === "number"
-                ? Number(val.toFixed(this.rounding))
-                : val;
+          for (const ent of collection) {
+            if (ent._dead) continue;
+
+            // Objeto visual básico
+            const visual = { id: ent.id };
+
+            // Asignar tipo visual (t o sprite)
+            visual[K.type] = config.sprite;
+
+            // Copiar propiedades numéricas con redondeo
+            for (const prop of config.props) {
+              const val = ent[prop];
+              if (typeof val === "number") {
+                visual[prop] = Number(val.toFixed(this.rounding));
+              } else {
+                visual[prop] = val;
+              }
+            }
+
+            // Mapas personalizados (si existen)
+            if (config.map) {
+              try {
+                Object.assign(visual, config.map(ent));
+              } catch (e) {}
+            }
+            entitiesPacket.push(visual);
           }
-          if (config.map) {
-            try {
-              Object.assign(visual, config.map(ent));
-            } catch (e) {}
-          }
-          entitiesPacket.push(visual);
         }
-      }
-    });
-    // 2. Construir el paquete final usando las claves dinámicas
-    const packet = {};
-    packet[K.global] = this.globals;
-    packet[K.pack] = entitiesPacket;
-    packet[K.effect] = effects;
+      });
 
-    return packet;
+      // 2. Construir Paquete
+      const packet = {};
+      packet[K.global] = this.globals;
+      packet[K.pack] = entitiesPacket;
+      packet[K.effect] = effects || [];
+
+      return packet;
+    } catch (error) {
+      console.error("CRITICAL RENDER ERROR:", error);
+      // En caso de emergencia, devolver paquete vacío para no colgar al cliente
+      return { error: "Render failed", g: {}, e: [], fx: [] };
+    }
   }
 }
 
@@ -250,9 +262,9 @@ const createGameContext = (state, renderSys, network) => {
       config: (c) => {
         if (c.precision) renderSys.rounding = c.precision;
         // --- NUEVO: Activar traductor ---
-        if(typeof c.debug !== 'undefined') renderSys.setDebug(c.debug);
+        if (typeof c.debug !== "undefined") renderSys.setDebug(c.debug);
       },
-      setGlobal: (k, v) => renderSys.setGlobal(k, v) // Asegúrate de tener esto expuesto
+      setGlobal: (k, v) => renderSys.setGlobal(k, v), // Asegúrate de tener esto expuesto
     },
     FX: {
       spawn: (t, x, y) => {
