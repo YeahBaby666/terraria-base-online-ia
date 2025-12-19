@@ -246,160 +246,162 @@ const createChannelArray = (initialList) => {
 
   return arr;
 };
-
-const ActorFactory = {
-  definitions: new Map(),
-  define: (name, schema) => ActorFactory.definitions.set(name, schema),
-
-  create: (name, config = {}, behaviors = {}, state, dispatcher) => {
-    const def = ActorFactory.definitions.get(name);
-    if (!def) return null;
-
-    // 1. Instancia Base
-    const entity = {
-      id: GLOBAL_ID++,
-      _type: name,
-      _dead: false,
-      ...JSON.parse(JSON.stringify(def.vars || {})),
-      ...config,
-
-      // 2. Canales Vitaminados (Arrays con .push y .delete)
-      channels: {
-        // 'in' escucha su grupo y 'all' por defecto
-        in: createChannelArray([...(def.channels?.in || []), "all"]),
-        // 'out' habla a sus definidos por defecto
-        out: createChannelArray([...(def.channels?.out || [])]),
-      },
-    };
-
-    // 3. Emitir y Recibir
-    entity.emit = (type, data, targetGroup = null) => {
-      dispatcher(entity, type, data, targetGroup);
-    };
-
-    entity._receive = (type, data) => {
-      const handler = behaviors[type];
-      if (handler) handler(entity, data);
-    };
-
-    // 4. GUARDADO CON AUTO-REPARACIÓN (FIX CRÍTICO)
-    const group = def.group || "default";
-
-    // Verificamos si existe Y si es un Array. Si no, lo reiniciamos.
-    if (!state[group] || !Array.isArray(state[group])) {
-      console.warn(`♻️ Reparando grupo corrupto: '${group}' (Reset a Array)`);
-      state[group] = [];
-    }
-
-    // Ahora es seguro hacer push
-    state[group].push(entity);
-
-    if (def.onCreate) def.onCreate(entity);
-    return entity;
-  },
-
-  destroy: (e) => {
-    if (e) e._dead = true;
-  },
-};
 // ====================================================================
-// --- 2. GAME CONTEXT & SANDBOX ---
+// --- 2. GAME CONTEXT & SANDBOX (CORREGIDO: DEEP COPIES & FACTORY) ---
 // ====================================================================
 
 const createGameContext = (state, renderSys, network) => {
   const layers = new Map();
 
-  // --- EL CORAZÓN DEL SISTEMA DE MENSAJES ---
+  // --- 1. SISTEMA DE MENSAJES (DISPATCHER) ---
   const dispatchMessage = (sender, type, data, explicitTarget) => {
-    // [DEBUG] Diagnóstico de Emisión
-    if (!sender) {
-      console.log(
-        `📢 [Game.emit] Intento enviar '${type}' a grupo '${explicitTarget}'`
-      );
-    }
-    // 1. ¿A quién va dirigido?
-    // Si hay sender (es un actor), usamos sus canales 'out' o el target explícito.
-    // Si sender es null (es el Game/Sistema), EL TARGET ES OBLIGATORIO.
-    // 1. Determinar canales
+    // A. DETERMINAR CANALES OBJETIVO
     let targetChannels = [];
+
     if (explicitTarget) {
+      // CASO 1: Envío explícito (Game.emit o Actor.emit con target)
+      // Verificamos permisos: Si hay remitente, debe tener el canal en 'out'.
+      // Si es el sistema (sender null), siempre tiene permiso.
       if (
         !sender ||
         (sender.channels && sender.channels.out.includes(explicitTarget))
       ) {
         targetChannels = [explicitTarget];
+      } else {
+        // Opcional: Log de bloqueo si intentan hablar donde no deben
+        // console.log(`⛔ Acceso denegado: ${sender._type} intentó hablar a '${explicitTarget}'`);
       }
     } else if (sender && sender.channels) {
+      // CASO 2: Broadcast a todos mis canales de salida
       targetChannels = sender.channels.out;
     }
-    // CASO A: SISTEMA (Game.emit)
-    if (!sender) {
-      if (explicitTarget) targets = [explicitTarget];
-      else console.warn("⚠️ Game.emit llamado sin Target (Grupo destino)");
-    }
-    // CASO B: ENTIDAD (me.emit)
-    else {
-      if (explicitTarget) {
-        if (sender.channels.out.includes(explicitTarget)) {
-          targets = [explicitTarget];
-        } else {
-          console.log(
-            `⛔ ${sender.id} bloqueado al intentar hablar a '${explicitTarget}'`
-          );
-        }
-      } else {
-        targets = sender.channels.out;
-      }
-    }
 
-    //// 2. Procesar canales
+    // B. PROCESAR CADA CANAL
     targetChannels.forEach((channelName) => {
       let groupsToScan = [];
 
-      // Determinar si es físico o virtual
+      // 1. ¿Es un grupo físico real? (Optimización)
       if (state[channelName] && Array.isArray(state[channelName])) {
         groupsToScan = [channelName];
       } else {
-        // Broadcast virtual a todos los grupos válidos
+        // 2. Es un canal virtual (Abstracto) -> Escanear todo el mundo
         groupsToScan = Object.keys(state).filter((k) =>
           Array.isArray(state[k])
         );
       }
 
-      // 3. Repartir mensaje
+      // C. ENTREGA DEL MENSAJE
       groupsToScan.forEach((groupName) => {
         const list = state[groupName];
-        if (!list || !Array.isArray(list)) return;
-// --- CORRECCIÓN AQUÍ: Declaramos la variable contador ---
-            let deliveredCount = 0;
+        if (!list) return;
+
+        let deliveredCount = 0; // Contador por grupo
+
         for (const receiver of list) {
           if (receiver._dead) continue;
 
-          // --- FIX CRÍTICO: DETECTOR DE ZOMBIES ---
-          // Si el objeto existe pero no tiene la función _receive, es un dato corrupto de la DB.
+          // Detector de Zombies (Datos corruptos sin funciones)
           if (typeof receiver._receive !== "function") {
-            // console.warn(`💀 Eliminando entidad Zombie en '${groupName}' (ID: ${receiver.id})`);
-            receiver._dead = true; // <--- LO MATAMOS PARA QUE EL MOTOR LO LIMPIE
+            receiver._dead = true;
             continue;
           }
 
-          // Si está vivo y funcional, comprobamos canales
+          // FILTRO CRÍTICO: ¿El receptor está sintonizando este canal?
           if (
             receiver.channels &&
             receiver.channels.in &&
             receiver.channels.in.includes(channelName)
           ) {
-            receiver._receive(type, data);
-            deliveredCount++; // <--- Incrementamos el contador
+            try {
+              receiver._receive(type, data);
+              deliveredCount++;
+            } catch (err) {
+              console.error(`❌ Error en receiver ${receiver.id}:`, err);
+            }
           }
-          if (!sender && deliveredCount > 0) {
-            console.log(
-              `✅ [Game.emit] Entregado a ${deliveredCount} actores en '${groupName}'`
-            );
-          }
+        }
+
+        // [DEBUG] Log solo para emisiones del sistema (Globales)
+        if (!sender && deliveredCount > 0) {
+          // console.log(`✅ [Game.emit] '${type}' entregado a ${deliveredCount} actores en '${groupName}'`);
         }
       });
     });
+  };
+
+  // --- 2. FÁBRICA DE ACTORES (FACTORY) ---
+  const ActorFactory = {
+    definitions: new Map(),
+
+    // DEFINE: Guarda la Plantilla y el Cerebro por Defecto
+    define: (typeName, templateConfig, defaultLogic = {}) => {
+      ActorFactory.definitions.set(typeName, {
+        config: templateConfig,
+        logic: defaultLogic,
+      });
+    },
+
+    // CREATE: Instancia Independiente
+    create: (typeName, instanceConfig, customBrain, stateRef, dispatchFn) => {
+      const template = ActorFactory.definitions.get(typeName);
+      if (!template) throw new Error(`Actor type '${typeName}' not defined`);
+
+      // A. FUSIÓN DE VARIABLES (Instance > Template)
+      const finalVars = {
+        ...(template.config.vars || {}),
+        ...(instanceConfig.vars || {}),
+      };
+
+      // B. CANALES (DEEP COPY CRÍTICO) 🛡️
+      // Creamos arrays nuevos en memoria. Si no lo hacemos, todos los actores
+      // compartirían el mismo array y al modificar uno, cambian todos.
+      const baseChannels = instanceConfig.channels ||
+        template.config.channels || { in: [], out: [] };
+
+      const finalChannels = {
+        in: baseChannels.in ? [...baseChannels.in] : [], // <--- Array Nuevo
+        out: baseChannels.out ? [...baseChannels.out] : [], // <--- Array Nuevo
+      };
+
+      // C. SELECCIÓN DE CEREBRO
+      // Prioridad: 1. Cerebro Custom (Callback) -> 2. Cerebro Default (Define) -> 3. Vacío
+      const brain = customBrain || template.logic || {};
+
+      // D. CONSTRUCCIÓN DEL OBJETO
+      const entity = {
+        id: Math.random().toString(36).substr(2, 9),
+        _type: typeName,
+        _dead: false,
+
+        x: instanceConfig.x || 0,
+        y: instanceConfig.y || 0,
+
+        ...finalVars, // Inyectamos vars en la raíz
+        channels: finalChannels, // Asignamos los canales independientes
+
+        // Binding del cerebro
+        _receive: (type, data) => {
+          if (brain[type]) {
+            brain[type](entity, data); // 'entity' es el 'me'
+          }
+        },
+
+        emit: (type, data, target) => dispatchFn(entity, type, data, target),
+      };
+
+      // E. INSERCIÓN EN GRUPO
+      const groupName =
+        instanceConfig.group || template.config.group || "default";
+
+      if (!stateRef[groupName]) stateRef[groupName] = [];
+      stateRef[groupName].push(entity);
+
+      return entity;
+    },
+
+    destroy: (entity) => {
+      entity._dead = true;
+    },
   };
   return {
     layer: (g, s) => layers.set(g, new UniverseCore(s)),
@@ -418,6 +420,7 @@ const createGameContext = (state, renderSys, network) => {
     find: (g) => state[g] || [],
     // A. Gestión de Actores
     Actor: {
+      // define(nombre, config, cerebro_por_defecto)
       define: ActorFactory.define,
       create: (n, c, b) => ActorFactory.create(n, c, b, state, dispatchMessage),
       destroy: ActorFactory.destroy,
