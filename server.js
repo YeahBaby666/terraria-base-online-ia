@@ -249,7 +249,36 @@ const createChannelArray = (initialList) => {
 // ====================================================================
 // --- 2. GAME CONTEXT & SANDBOX (CORREGIDO: DEEP COPIES & FACTORY) ---
 // ====================================================================
+// ====================================================================
+// --- ACTOR HYDRATOR (EL REANIMADOR DE ENTIDADES) ---
+// ====================================================================
+const ActorHydrator = {
+  // Vincula la lógica a un objeto plano recuperado de la DB
+  hydrate: (entity, definitions, dispatchFn) => {
+    if (!entity || !entity._type) return;
 
+    const template = definitions.get(entity._type);
+    if (!template) return;
+
+    // 1. Restaurar _receive (Independiente para cada instancia)
+    entity._receive = (type, data) => {
+      // Buscamos en la lógica de la definición (el cerebro)
+      if (template.logic && template.logic[type]) {
+        template.logic[type](entity, data);
+      }
+    };
+
+    // 2. Restaurar emit (Independiente)
+    entity.emit = (type, data, target) =>
+      dispatchFn(entity, type, data, target);
+
+    // 3. Asegurar que los canales sean arrays (independencia)
+    if (entity.channels) {
+      if (!Array.isArray(entity.channels.in)) entity.channels.in = [];
+      if (!Array.isArray(entity.channels.out)) entity.channels.out = [];
+    }
+  },
+};
 const createGameContext = (state, renderSys, network) => {
   const layers = new Map();
 
@@ -329,78 +358,46 @@ const createGameContext = (state, renderSys, network) => {
     });
   };
 
-  // --- 2. FÁBRICA DE ACTORES (FACTORY) ---
   const ActorFactory = {
     definitions: new Map(),
-
-    // DEFINE: Guarda la Plantilla y el Cerebro por Defecto
     define: (typeName, templateConfig, defaultLogic = {}) => {
       ActorFactory.definitions.set(typeName, {
         config: templateConfig,
         logic: defaultLogic,
       });
     },
-
-    // CREATE: Instancia Independiente
     create: (typeName, instanceConfig, customBrain, stateRef, dispatchFn) => {
       const template = ActorFactory.definitions.get(typeName);
       if (!template) throw new Error(`Actor type '${typeName}' not defined`);
 
-      // A. FUSIÓN DE VARIABLES (Instance > Template)
       const finalVars = {
         ...(template.config.vars || {}),
         ...(instanceConfig.vars || {}),
       };
-
-      // B. CANALES (DEEP COPY CRÍTICO) 🛡️
-      // Creamos arrays nuevos en memoria. Si no lo hacemos, todos los actores
-      // compartirían el mismo array y al modificar uno, cambian todos.
       const baseChannels = instanceConfig.channels ||
         template.config.channels || { in: [], out: [] };
 
-      const finalChannels = {
-        in: baseChannels.in ? [...baseChannels.in] : [], // <--- Array Nuevo
-        out: baseChannels.out ? [...baseChannels.out] : [], // <--- Array Nuevo
-      };
-
-      // C. SELECCIÓN DE CEREBRO
-      // Prioridad: 1. Cerebro Custom (Callback) -> 2. Cerebro Default (Define) -> 3. Vacío
-      const brain = customBrain || template.logic || {};
-
-      // D. CONSTRUCCIÓN DEL OBJETO
       const entity = {
         id: Math.random().toString(36).substr(2, 9),
         _type: typeName,
         _dead: false,
-
         x: instanceConfig.x || 0,
         y: instanceConfig.y || 0,
-
-        ...finalVars, // Inyectamos vars en la raíz
-        channels: finalChannels, // Asignamos los canales independientes
-
-        // Binding del cerebro
-        _receive: (type, data) => {
-          if (brain[type]) {
-            brain[type](entity, data); // 'entity' es el 'me'
-          }
+        ...finalVars,
+        channels: {
+          in: [...(baseChannels.in || [])],
+          out: [...(baseChannels.out || [])],
         },
-
-        emit: (type, data, target) => dispatchFn(entity, type, data, target),
       };
 
-      // E. INSERCIÓN EN GRUPO
+      // Hidratamos la entidad recién nacida
+      ActorHydrator.hydrate(entity, ActorFactory.definitions, dispatchFn);
+
       const groupName =
         instanceConfig.group || template.config.group || "default";
-
       if (!stateRef[groupName]) stateRef[groupName] = [];
       stateRef[groupName].push(entity);
-
       return entity;
-    },
-
-    destroy: (entity) => {
-      entity._dead = true;
     },
   };
   return {
@@ -424,6 +421,22 @@ const createGameContext = (state, renderSys, network) => {
       define: ActorFactory.define,
       create: (n, c, b) => ActorFactory.create(n, c, b, state, dispatchMessage),
       destroy: ActorFactory.destroy,
+      // EXPOMEMOS EL HYDRATOR PARA EL LOOP
+      sync: () => {
+        Object.keys(state).forEach((group) => {
+          if (Array.isArray(state[group])) {
+            state[group].forEach((entity) => {
+              if (!entity._receive) {
+                ActorHydrator.hydrate(
+                  entity,
+                  ActorFactory.definitions,
+                  dispatchMessage
+                );
+              }
+            });
+          }
+        });
+      },
     },
     // --- AQUÍ ESTÁ EL CAMBIO DE ORDEN ---
     // Ahora es igual que me.emit: (TIPO, DATA, TARGET)
