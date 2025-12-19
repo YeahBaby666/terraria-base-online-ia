@@ -280,125 +280,54 @@ const ActorHydrator = {
   },
 };
 const createGameContext = (state, renderSys, network) => {
-  const layers = new Map();
+  const definitions = new Map();
 
-  // --- 1. SISTEMA DE MENSAJES (DISPATCHER) ---
+  // --- DISPATCHER ---
   const dispatchMessage = (sender, type, data, explicitTarget) => {
-    // A. DETERMINAR CANALES OBJETIVO
     let targetChannels = [];
-
     if (explicitTarget) {
-      // CASO 1: Envío explícito (Game.emit o Actor.emit con target)
-      // Verificamos permisos: Si hay remitente, debe tener el canal en 'out'.
-      // Si es el sistema (sender null), siempre tiene permiso.
       if (
         !sender ||
         (sender.channels && sender.channels.out.includes(explicitTarget))
       ) {
         targetChannels = [explicitTarget];
-      } else {
-        // Opcional: Log de bloqueo si intentan hablar donde no deben
-        // console.log(`⛔ Acceso denegado: ${sender._type} intentó hablar a '${explicitTarget}'`);
       }
     } else if (sender && sender.channels) {
-      // CASO 2: Broadcast a todos mis canales de salida
       targetChannels = sender.channels.out;
     }
 
-    // B. PROCESAR CADA CANAL
     targetChannels.forEach((channelName) => {
-      let groupsToScan = [];
-
-      // 1. ¿Es un grupo físico real? (Optimización)
-      if (state[channelName] && Array.isArray(state[channelName])) {
-        groupsToScan = [channelName];
-      } else {
-        // 2. Es un canal virtual (Abstracto) -> Escanear todo el mundo
-        groupsToScan = Object.keys(state).filter((k) =>
-          Array.isArray(state[k])
-        );
-      }
-
-      // C. ENTREGA DEL MENSAJE
-      groupsToScan.forEach((groupName) => {
+      // Buscamos en todos los grupos del state
+      Object.keys(state).forEach((groupName) => {
         const list = state[groupName];
-        if (!list) return;
-
-        let deliveredCount = 0; // Contador por grupo
+        if (!Array.isArray(list)) return;
 
         for (const receiver of list) {
           if (receiver._dead) continue;
-
-          // Detector de Zombies (Datos corruptos sin funciones)
+          // Sincronización al vuelo: si perdió la lógica por la DB, se la re-inyectamos
           if (typeof receiver._receive !== "function") {
-            receiver._dead = true;
-            continue;
+            syncEntity(receiver);
           }
 
-          // FILTRO CRÍTICO: ¿El receptor está sintonizando este canal?
-          if (
-            receiver.channels &&
-            receiver.channels.in &&
-            receiver.channels.in.includes(channelName)
-          ) {
-            try {
-              receiver._receive(type, data);
-              deliveredCount++;
-            } catch (err) {
-              console.error(`❌ Error en receiver ${receiver.id}:`, err);
-            }
+          if (receiver.channels?.in?.includes(channelName)) {
+            receiver._receive(type, data);
           }
-        }
-
-        // [DEBUG] Log solo para emisiones del sistema (Globales)
-        if (!sender && deliveredCount > 0) {
-          // console.log(`✅ [Game.emit] '${type}' entregado a ${deliveredCount} actores en '${groupName}'`);
         }
       });
     });
   };
 
-  const ActorFactory = {
-    definitions: new Map(),
-    define: (typeName, templateConfig, defaultLogic = {}) => {
-      ActorFactory.definitions.set(typeName, {
-        config: templateConfig,
-        logic: defaultLogic,
-      });
-    },
-    create: (typeName, instanceConfig, customBrain, stateRef, dispatchFn) => {
-      const template = ActorFactory.definitions.get(typeName);
-      if (!template) throw new Error(`Actor type '${typeName}' not defined`);
+  // --- HELPER DE SINCRONIZACIÓN (HYDRATE) ---
+  const syncEntity = (entity) => {
+    const def = definitions.get(entity._type);
+    if (!def) return;
 
-      const finalVars = {
-        ...(template.config.vars || {}),
-        ...(instanceConfig.vars || {}),
-      };
-      const baseChannels = instanceConfig.channels ||
-        template.config.channels || { in: [], out: [] };
-
-      const entity = {
-        id: Math.random().toString(36).substr(2, 9),
-        _type: typeName,
-        _dead: false,
-        x: instanceConfig.x || 0,
-        y: instanceConfig.y || 0,
-        ...finalVars,
-        channels: {
-          in: [...(baseChannels.in || [])],
-          out: [...(baseChannels.out || [])],
-        },
-      };
-
-      // Hidratamos la entidad recién nacida
-      ActorHydrator.hydrate(entity, ActorFactory.definitions, dispatchFn);
-
-      const groupName =
-        instanceConfig.group || template.config.group || "default";
-      if (!stateRef[groupName]) stateRef[groupName] = [];
-      stateRef[groupName].push(entity);
-      return entity;
-    },
+    // Inyectamos las funciones que el JSON no puede guardar
+    entity._receive = (type, data) => {
+      if (def.logic && def.logic[type]) def.logic[type](entity, data);
+    };
+    entity.emit = (type, data, target) =>
+      dispatchMessage(entity, type, data, target);
   };
   return {
     layer: (g, s) => layers.set(g, new UniverseCore(s)),
@@ -417,25 +346,44 @@ const createGameContext = (state, renderSys, network) => {
     find: (g) => state[g] || [],
     // A. Gestión de Actores
     Actor: {
-      // define(nombre, config, cerebro_por_defecto)
-      define: ActorFactory.define,
-      create: (n, c, b) => ActorFactory.create(n, c, b, state, dispatchMessage),
-      destroy: ActorFactory.destroy,
-      // EXPOMEMOS EL HYDRATOR PARA EL LOOP
-      sync: () => {
-        Object.keys(state).forEach((group) => {
-          if (Array.isArray(state[group])) {
-            state[group].forEach((entity) => {
-              if (!entity._receive) {
-                ActorHydrator.hydrate(
-                  entity,
-                  ActorFactory.definitions,
-                  dispatchMessage
-                );
-              }
-            });
-          }
-        });
+      define: (typeName, config, logic) => {
+        definitions.set(typeName, { config, logic });
+      },
+      create: (typeName, instConfig, customLogic) => {
+        const def = definitions.get(typeName);
+        if (!def) return;
+
+        // Construcción de la instancia única
+        const entity = {
+          id: Math.random().toString(36).substr(2, 9),
+          _type: typeName,
+          _dead: false,
+          x: instConfig.x || 0,
+          y: instConfig.y || 0,
+          ...(def.config.vars || {}),
+          ...(instConfig.vars || {}),
+          channels: {
+            in: [...(instConfig.channels?.in || def.config.channels?.in || [])],
+            out: [
+              ...(instConfig.channels?.out || def.config.channels?.out || []),
+            ],
+          },
+        };
+
+        // Si se pasa una lógica personalizada (mutante), se usa esa, si no la del define
+        const activeLogic = customLogic || def.logic;
+
+        // Vinculación de métodos
+        entity._receive = (type, data) => {
+          if (activeLogic && activeLogic[type]) activeLogic[type](entity, data);
+        };
+        entity.emit = (type, data, target) =>
+          dispatchMessage(entity, type, data, target);
+
+        const group = instConfig.group || def.config.group || "default";
+        if (!state[group]) state[group] = [];
+        state[group].push(entity);
+        return entity;
       },
     },
     // --- AQUÍ ESTÁ EL CAMBIO DE ORDEN ---
