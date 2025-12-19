@@ -252,9 +252,16 @@ const ActorFactory = {
       if (handler) handler(entity, data);
     };
 
-    // 4. Guardado
+    // 4. GUARDADO CON AUTO-REPARACIÓN (FIX CRÍTICO)
     const group = def.group || "default";
-    if (!state[group]) state[group] = [];
+
+    // Verificamos si existe Y si es un Array. Si no, lo reiniciamos.
+    if (!state[group] || !Array.isArray(state[group])) {
+      console.warn(`♻️ Reparando grupo corrupto: '${group}' (Reset a Array)`);
+      state[group] = [];
+    }
+
+    // Ahora es seguro hacer push
     state[group].push(entity);
 
     if (def.onCreate) def.onCreate(entity);
@@ -296,7 +303,9 @@ const createGameContext = (state, renderSys, network) => {
         if (sender.channels.out.includes(explicitTarget)) {
           targets = [explicitTarget];
         } else {
-          console.log(`⛔ ${sender.id} bloqueado al intentar hablar a '${explicitTarget}'`);
+          console.log(
+            `⛔ ${sender.id} bloqueado al intentar hablar a '${explicitTarget}'`
+          );
         }
       } else {
         targets = sender.channels.out;
@@ -308,9 +317,10 @@ const createGameContext = (state, renderSys, network) => {
       // --- FIX CRÍTICO: VALIDAR QUE SEA ARRAY ---
       // Si list existe pero NO es un array (ej: objeto basura), salimos para evitar crash.
       if (!list || !Array.isArray(list)) {
-          if(!sender && !list) console.warn(`⚠️ El grupo '${groupName}' no existe.`);
-          // Si existe pero no es array, lo ignoramos silenciosamente
-          return;
+        if (!sender && !list)
+          console.warn(`⚠️ El grupo '${groupName}' no existe.`);
+        // Si existe pero no es array, lo ignoramos silenciosamente
+        return;
       }
 
       // Recorremos todos los actores de ese grupo
@@ -326,7 +336,9 @@ const createGameContext = (state, renderSys, network) => {
       }
 
       if (!sender && deliveredCount > 0) {
-          console.log(`✅ [Game.emit] Entregado a ${deliveredCount} actores en '${groupName}'`);
+        console.log(
+          `✅ [Game.emit] Entregado a ${deliveredCount} actores en '${groupName}'`
+        );
       }
     });
   };
