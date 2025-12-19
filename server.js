@@ -305,9 +305,11 @@ const createGameContext = (state, renderSys, network) => {
     // 3. Entrega del mensaje a los destinatarios
     targets.forEach((groupName) => {
       const list = state[groupName];
-      // [DEBUG] Verificar si el grupo existe
-      if (!list) {
-          if(!sender) console.warn(`⚠️ [Game.emit] El grupo '${groupName}' no existe o está vacío.`);
+      // --- FIX CRÍTICO: VALIDAR QUE SEA ARRAY ---
+      // Si list existe pero NO es un array (ej: objeto basura), salimos para evitar crash.
+      if (!list || !Array.isArray(list)) {
+          if(!sender && !list) console.warn(`⚠️ El grupo '${groupName}' no existe.`);
+          // Si existe pero no es array, lo ignoramos silenciosamente
           return;
       }
 
