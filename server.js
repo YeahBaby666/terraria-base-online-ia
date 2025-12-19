@@ -43,6 +43,7 @@ class RenderCore {
   }
 
   setup(typeName, config) {
+    // console.log(`[Render Setup] Registrado tipo: '${typeName}' en grupo: '${config.group}'`);
     this.configs.set(typeName, {
       sprite: "default",
       props: ["x", "y"],
@@ -58,23 +59,46 @@ class RenderCore {
 
   processSnapshot(state, effects) {
     const entitiesPacket = [];
+
+    // [DEBUG] Diagnóstico rápido (solo si hay configs pero no sale nada)
+    if (this.configs.size === 0)
+      console.warn(
+        "[Render] ⚠️ No hay configuraciones visuales (Game.Render.type)"
+      );
+    // [DEBUG] Diagnóstico rápido (solo si hay configs pero no sale nada)
+    if (this.configs.size === 0)
+      console.warn(
+        "[Render] ⚠️ No hay configuraciones visuales (Game.Render.type)"
+      );
+
     try {
       this.configs.forEach((config, typeName) => {
         const groupName = config.group;
+        const list = state[groupName];
 
-        if (state[groupName]) {
-          const collection = Array.isArray(state[groupName])
-            ? state[groupName]
-            : Object.values(state[groupName]);
+        // [DEBUG] Chequeo de existencia
+        if (!list) {
+          console.log(`[Render] Grupo '${groupName}' no existe en state.`);
+          return;
+        }
+        if (!Array.isArray(list)) {
+          console.log(`[Render] Grupo '${groupName}' no es Array.`);
+          return;
+        }
+        if (list.length > 0)
+          console.log(
+            `[Render] Grupo '${groupName}' tiene ${list.length} entidades.`
+          );
 
-          for (const ent of collection) {
+        if (list && Array.isArray(list)) {
+          for (const ent of list) {
+            // FILTRO DE MUERTOS
             if (ent._dead) continue;
 
-            // Objeto visual básico
-            // Empaquetado CRUDO: 't' en lugar de sprite
+            // 1. Construir objeto visual
             const visual = { id: ent.id, t: config.sprite };
 
-            // Copiar propiedades numéricas con redondeo
+            // 2. Copiar propiedades
             for (const prop of config.props) {
               const val = ent[prop];
               if (typeof val === "number") {
@@ -84,12 +108,13 @@ class RenderCore {
               }
             }
 
-            // Mapas personalizados (si existen)
+            // 3. Mapas extra
             if (config.map) {
               try {
                 Object.assign(visual, config.map(ent));
               } catch (e) {}
             }
+
             entitiesPacket.push(visual);
           }
         }
@@ -98,6 +123,11 @@ class RenderCore {
       console.error("CRITICAL RENDER ERROR:", error);
       // En caso de emergencia, devolver paquete vacío para no colgar al cliente
       return { error: "Render failed", g: {}, e: [], fx: [] };
+    }
+
+    // [DEBUG] Salida final
+    if (entitiesPacket.length === 0 && Object.keys(state).length > 2) {
+      console.warn("[Render] ⚠️ Paquete vacío aunque hay estado.");
     }
     // Retorna: e (entities), g (globals), fx (effects)
     return { g: this.globals, e: entitiesPacket, fx: effects || [] };
