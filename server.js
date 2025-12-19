@@ -278,11 +278,10 @@ const createGameContext = (state, renderSys, network) => {
         if (receiver._dead) continue;
 
         // Filtro de canal
-        if (
-          receiver.channels?.in?.includes(explicitTarget || groupName) ||
-          !explicitTarget
-        ) {
-          if (receiver._receive) receiver._receive(type, data);
+        // Si el actor tiene la función, le entregamos el mensaje.
+        // Esto asegura que 'tick' llegue siempre.
+        if (typeof actor._receive === "function") {
+          actor._receive(type, data);
         }
       }
     });
