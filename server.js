@@ -40,18 +40,6 @@ class RenderCore {
     this.configs = new Map();
     this.globals = {};
     this.rounding = 1;
-    this.debugMode = false; // Por defecto optimizado
-
-    // Diccionarios de traducción (DEFINIDOS EN EL CONSTRUCTOR)
-    this.KEYS = {
-      PROD: { pack: "e", global: "g", effect: "fx", type: "t" },
-      DEV: {
-        pack: "entities",
-        global: "globals",
-        effect: "effects",
-        type: "sprite",
-      },
-    };
   }
 
   setup(typeName, config) {
@@ -68,14 +56,8 @@ class RenderCore {
     this.globals[key] = value;
   }
 
-  setDebug(isEnabled) {
-    this.debugMode = !!isEnabled; // Forzar booleano
-  }
-
   processSnapshot(state, effects) {
     try {
-      // 1. Seleccionar claves según modo
-      const K = this.debugMode ? this.KEYS.DEV : this.KEYS.PROD;
       const entitiesPacket = [];
 
       this.configs.forEach((config, typeName) => {
@@ -90,7 +72,8 @@ class RenderCore {
             if (ent._dead) continue;
 
             // Objeto visual básico
-            const visual = { id: ent.id };
+            // Empaquetado CRUDO: 't' en lugar de sprite
+            const visual = { id: ent.id, t: config.sprite };
 
             // Asignar tipo visual (t o sprite)
             visual[K.type] = config.sprite;
@@ -115,19 +98,13 @@ class RenderCore {
           }
         }
       });
-
-      // 2. Construir Paquete
-      const packet = {};
-      packet[K.global] = this.globals;
-      packet[K.pack] = entitiesPacket;
-      packet[K.effect] = effects || [];
-
-      return packet;
     } catch (error) {
       console.error("CRITICAL RENDER ERROR:", error);
       // En caso de emergencia, devolver paquete vacío para no colgar al cliente
       return { error: "Render failed", g: {}, e: [], fx: [] };
     }
+    // Retorna: e (entities), g (globals), fx (effects)
+    return { g: this.globals, e: entitiesPacket, fx: effects || [] };
   }
 }
 
