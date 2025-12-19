@@ -238,8 +238,7 @@ const createGameContext = (state, renderSys, network) => {
       type: (n, c) => renderSys.setup(n, c),
       config: (c) => {
         if (c.precision) renderSys.rounding = c.precision;
-        // --- NUEVO: Activar traductor ---
-        if (typeof c.debug !== "undefined") renderSys.setDebug(c.debug);
+        
       },
       setGlobal: (k, v) => renderSys.setGlobal(k, v), // Asegúrate de tener esto expuesto
     },
