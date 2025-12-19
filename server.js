@@ -40,6 +40,20 @@ class RenderCore {
     this.configs = new Map();
     this.globals = {};
     this.rounding = 1;
+
+    // --- NUEVO: CONFIGURACIÓN DE MODO ---
+    this.debugMode = false; // Por defecto optimizado
+
+    // Diccionarios de traducción
+    this.KEYS = {
+      PROD: { pack: "e", global: "g", effect: "fx", type: "t" },
+      DEV: {
+        pack: "entities",
+        global: "globals",
+        effect: "effects",
+        type: "sprite",
+      },
+    };
   }
 
   setup(typeName, config) {
@@ -52,11 +66,18 @@ class RenderCore {
     });
   }
 
+  // --- NUEVO: Función para cambiar el modo ---
+  setDebug(isEnabled) {
+    this.debugMode = isEnabled;
+  }
+
   setGlobal(key, value) {
     this.globals[key] = value;
   }
 
   processSnapshot(state, effects) {
+    // 1. Seleccionar el diccionario según el modo
+    const K = this.debugMode ? this.KEYS.DEV : this.KEYS.PROD;
     const entitiesPacket = [];
     this.configs.forEach((config, typeName) => {
       const groupName = config.group;
@@ -67,7 +88,11 @@ class RenderCore {
 
         for (const ent of collection) {
           if (ent._dead) continue;
-          const visual = { id: ent.id, t: config.sprite };
+
+          // USAMOS LA CLAVE DINÁMICA PARA EL TIPO (t vs sprite)
+          const visual = { id: ent.id };
+          visual[K.type] = config.sprite;
+
           for (const prop of config.props) {
             const val = ent[prop];
             visual[prop] =
@@ -84,7 +109,13 @@ class RenderCore {
         }
       }
     });
-    return { g: this.globals, e: entitiesPacket, fx: effects };
+    // 2. Construir el paquete final usando las claves dinámicas
+    const packet = {};
+    packet[K.global] = this.globals;
+    packet[K.pack] = entitiesPacket;
+    packet[K.effect] = effects;
+
+    return packet;
   }
 }
 
@@ -218,7 +249,10 @@ const createGameContext = (state, renderSys, network) => {
       type: (n, c) => renderSys.setup(n, c),
       config: (c) => {
         if (c.precision) renderSys.rounding = c.precision;
+        // --- NUEVO: Activar traductor ---
+        if(typeof c.debug !== 'undefined') renderSys.setDebug(c.debug);
       },
+      setGlobal: (k, v) => renderSys.setGlobal(k, v) // Asegúrate de tener esto expuesto
     },
     FX: {
       spawn: (t, x, y) => {
@@ -464,7 +498,6 @@ io.on("connection", async (socket) => {
     }
   });
 
-  
   // --- RESTAURADO: PERSISTENCIA AL SALIR ---
   socket.on("disconnect", async () => {
     if (!socket.roomId || !rooms[socket.roomId]) return;
