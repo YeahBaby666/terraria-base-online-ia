@@ -385,8 +385,12 @@ const createGameContext = (state, renderSys, network) => {
         state[group].push(entity);
         return entity;
       },
+      // ESTA ES LA FUNCIÓN QUE FALTA:
+        destroy: (entity) => {
+            if (entity) entity._dead = true;
+        }
     },
-    // --- AQUÍ ESTÁ EL CAMBIO DE ORDEN ---
+        // --- AQUÍ ESTÁ EL CAMBIO DE ORDEN ---
     // Ahora es igual que me.emit: (TIPO, DATA, TARGET)
     emit: (type, data, targetGroup) => {
       dispatchMessage(null, type, data, targetGroup);
