@@ -466,127 +466,129 @@ io.on("connection", async (socket) => {
     socket.roomId = roomId;
     socket.userId = userId;
 
-    if (!rooms[roomId]) {
-      console.log(`[*] Iniciando sala: ${roomId}`);
-      const { data } = await supabase
-        .from("game_rooms")
-        .select("*")
-        .eq("name", roomId)
-        .single();
-      if (error || !data) {
-        console.error("Error DB:", error);
-        return socket.emit("system_error", "Sala no encontrada o Error DB");
-      }
-      let state = {};
-      try {
-        state = data.game_state_data ? JSON.parse(data.game_state_data) : {};
-      } catch (e) {
-        console.error("Error parseando estado JSON DB");
-      }
-
-      rooms[roomId] = {
-        state: compiled.state,
-        logic: compiled.userLogic,
-        renderFn: compiled.renderFn,
-        inputQueue: [],
-        players: new Set(),
-        bots: new Map(), // Memoria para bots
-      };
-
-      // GAME LOOP
-      let tickCount = 0;
-      rooms[roomId].interval = setInterval(() => {
-        const r = rooms[roomId];
-        try {
-          // LOG DE DIAGNÓSTICO (Muestra 1 mensaje cada ~5 segundos)
-          tickCount++;
-          if (tickCount % 300 === 0) {
-            console.log(
-              `[Sala ${roomId}] Estado: Corriendo. Inputs: ${r.inputQueue.length}`
-            );
-          }
-          // 1. INPUTS
-          while (r.inputQueue.length > 0) {
-            const input = r.inputQueue.shift();
-            if (r.logic.onInput) r.logic.onInput(input, r.state);
-          }
-
-          // 2. GESTIÓN DE BOTS (Restaurado)
-          // A. Spawn
-          if (r.state._sys && r.state._sys.spawnQueue.length > 0) {
-            const q = r.state._sys.spawnQueue;
-            while (q.length > 0) {
-              const req = q.shift();
-              // Usamos ActorFactory para crear el cuerpo físico del Bot
-              // Asumimos que config tiene { type: 'Zombie', x: 0, y: 0 }
-              const type = req.config.type || "Zombie"; // Default fallback
-              const ent = ActorFactory.create(
-                type,
-                req.config.x || 0,
-                req.config.y || 0,
-                { isBot: true, ...req.config },
-                r.state
-              );
-
-              // Registrar en memoria de control
-              r.bots.set(ent.id, { id: ent.id, memory: {} });
-            }
-          }
-          // B. Kill
-          if (r.state._sys && r.state._sys.killQueue.length > 0) {
-            const q = r.state._sys.killQueue;
-            while (q.length > 0) {
-              const id = q.shift();
-              r.bots.delete(id);
-              // Buscar y matar entidad en todos los grupos (ineficiente pero seguro)
-              for (const k in r.state) {
-                if (Array.isArray(r.state[k])) {
-                  const e = r.state[k].find((x) => x.id === id);
-                  if (e) e._dead = true;
-                }
-              }
-            }
-          }
-          // C. Update IA
-          if (r.logic.onBot) {
-            for (const [botId, botCtrl] of r.bots) {
-              // Buscar entidad física
-              let ent = null;
-              // Buscamos en los grupos comunes (optimizable si sabemos el grupo)
-              if (r.state.enemies)
-                ent = r.state.enemies.find((e) => e.id === botId);
-              if (!ent && r.state.players)
-                ent = r.state.players.find((e) => e.id === botId);
-
-              if (ent && !ent._dead) {
-                const action = r.logic.onBot(ent, botCtrl.memory, r.state);
-                if (action && r.logic.onInput) {
-                  action.id = botId; // Auto-firmar input
-                  r.logic.onInput(action, r.state);
-                }
-              }
-            }
-          }
-
-          // 3. UPDATE GENERAL
-          if (r.logic.onUpdate) r.logic.onUpdate(r.state, 0.016);
-
-          // 4. RENDER
-          if (r.renderFn) {
-            const packet = r.renderFn();
-            // Si el paquete está corrupto, lo limpiamos
-            if(!packet) packet = { g:{}, e:[], fx:[] };
-            io.to(roomId).emit("render_update", packet);
-            r.state.effects = [];
-          }
-          else {
-             console.error(`[ALERTA] Sala ${roomId} no tiene renderFn!`);
-          }
-        } catch (e) {
-          console.error(`Crash en sala ${roomId}:`, e.message);
-        }
-      }, 16);
+    // --- CORRECCIÓN AQUÍ ---
+    // Debes extraer 'error' también, no solo 'data'
+    const { data, error } = await supabase
+      .from("game_rooms")
+      .select("*")
+      .eq("name", roomId)
+      .single();
+    if (error || !data) {
+      console.error("Error DB:", error);
+      return socket.emit("system_error", "Sala no encontrada o Error DB");
     }
+    let state = {};
+    try {
+      state = data.game_state_data ? JSON.parse(data.game_state_data) : {};
+    } catch (e) {
+      console.error("Error parseando estado JSON DB");
+    }
+    const compiled = compileLogic(data.server_logic, state, roomId, io);
+    rooms[roomId] = {
+      state: compiled.state,
+      logic: compiled.userLogic,
+      renderFn: compiled.renderFn,
+      inputQueue: [],
+      players: new Set(),
+      bots: new Map(), // Memoria para bots
+    };
+
+    // GAME LOOP
+    let tickCount = 0;
+    // Log reducido para no saturar la consola
+    if (tickCount % 300 === 0) {
+      // console.log(`[Sala ${roomId}] Estado: Corriendo...`);
+    }
+    rooms[roomId].interval = setInterval(() => {
+      const r = rooms[roomId];
+      try {
+        // LOG DE DIAGNÓSTICO (Muestra 1 mensaje cada ~5 segundos)
+        tickCount++;
+        if (tickCount % 300 === 0) {
+          console.log(
+            `[Sala ${roomId}] Estado: Corriendo. Inputs: ${r.inputQueue.length}`
+          );
+        }
+        // 1. INPUTS
+        while (r.inputQueue.length > 0) {
+          const input = r.inputQueue.shift();
+          if (r.logic.onInput) r.logic.onInput(input, r.state);
+        }
+
+        // 2. GESTIÓN DE BOTS (Restaurado)
+        // A. Spawn
+        if (r.state._sys && r.state._sys.spawnQueue.length > 0) {
+          const q = r.state._sys.spawnQueue;
+          while (q.length > 0) {
+            const req = q.shift();
+            // Usamos ActorFactory para crear el cuerpo físico del Bot
+            // Asumimos que config tiene { type: 'Zombie', x: 0, y: 0 }
+            const type = req.config.type || "Zombie"; // Default fallback
+            const ent = ActorFactory.create(
+              type,
+              req.config.x || 0,
+              req.config.y || 0,
+              { isBot: true, ...req.config },
+              r.state
+            );
+
+            // Registrar en memoria de control
+            r.bots.set(ent.id, { id: ent.id, memory: {} });
+          }
+        }
+        // B. Kill
+        if (r.state._sys && r.state._sys.killQueue.length > 0) {
+          const q = r.state._sys.killQueue;
+          while (q.length > 0) {
+            const id = q.shift();
+            r.bots.delete(id);
+            // Buscar y matar entidad en todos los grupos (ineficiente pero seguro)
+            for (const k in r.state) {
+              if (Array.isArray(r.state[k])) {
+                const e = r.state[k].find((x) => x.id === id);
+                if (e) e._dead = true;
+              }
+            }
+          }
+        }
+        // C. Update IA
+        if (r.logic.onBot) {
+          for (const [botId, botCtrl] of r.bots) {
+            // Buscar entidad física
+            let ent = null;
+            // Buscamos en los grupos comunes (optimizable si sabemos el grupo)
+            if (r.state.enemies)
+              ent = r.state.enemies.find((e) => e.id === botId);
+            if (!ent && r.state.players)
+              ent = r.state.players.find((e) => e.id === botId);
+
+            if (ent && !ent._dead) {
+              const action = r.logic.onBot(ent, botCtrl.memory, r.state);
+              if (action && r.logic.onInput) {
+                action.id = botId; // Auto-firmar input
+                r.logic.onInput(action, r.state);
+              }
+            }
+          }
+        }
+
+        // 3. UPDATE GENERAL
+        if (r.logic.onUpdate) r.logic.onUpdate(r.state, 0.016);
+
+        // 4. RENDER
+        if (r.renderFn) {
+          const packet = r.renderFn();
+          // Si el paquete está corrupto, lo limpiamos
+          if (!packet) packet = { g: {}, e: [], fx: [] };
+          io.to(roomId).emit("render_update", packet);
+          r.state.effects = [];
+        } else {
+          console.error(`[ALERTA] Sala ${roomId} no tiene renderFn!`);
+        }
+      } catch (e) {
+        console.error(`Crash en sala ${roomId}:`, e.message);
+      }
+    }, 16);
 
     const r = rooms[roomId];
     r.players.add(socket.id);
