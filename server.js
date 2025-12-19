@@ -363,6 +363,8 @@ const createGameContext = (state, renderSys, network) => {
 };
 
 function compileLogic(serverLogic, initialState, roomId, ioInstance) {
+  // Protección contra lógica vacía o nula
+  const safeLogic = serverLogic || "// Lógica vacía por defecto";
   // 1. Inicializar Sistema de Control (_sys) para Bots
   if (!initialState.effects) initialState.effects = [];
   if (!initialState._sys)
@@ -423,7 +425,11 @@ function compileLogic(serverLogic, initialState, roomId, ioInstance) {
   };
 
   const code = `
-        ${serverLogic}
+        try {
+            ${safeLogic}
+        } catch (err) {
+            console.error("Runtime Error en lógica de usuario:", err);
+        }
         ;({
             onUpdate: (typeof onUpdate !== 'undefined' ? onUpdate : null),
             onInput: (typeof onInput !== 'undefined' ? onInput : null),
@@ -433,6 +439,7 @@ function compileLogic(serverLogic, initialState, roomId, ioInstance) {
 
   try {
     const userLogic = new vm.Script(code).runInNewContext(sandbox);
+    console.log(`✅ Lógica compilada para sala ${roomId}`);
     return {
       userLogic,
       state: initialState,
@@ -440,8 +447,12 @@ function compileLogic(serverLogic, initialState, roomId, ioInstance) {
         roomRender.processSnapshot(initialState, initialState.effects),
     };
   } catch (e) {
-    console.error("Error compilando lógica:", e);
-    return { state: initialState, userLogic: {} };
+    console.error("❌ Error FATAL compilando lógica:", e.message);
+    return {
+      state: initialState,
+      userLogic: {},
+      renderFn: () => ({ g: { error: "Logic Compile Error" }, e: [], fx: [] }),
+    };
   }
 }
 
@@ -462,10 +473,16 @@ io.on("connection", async (socket) => {
         .select("*")
         .eq("name", roomId)
         .single();
-      if (!data) return socket.emit("system_error", "Sala no encontrada");
-
-      let state = data.game_state_data ? JSON.parse(data.game_state_data) : {};
-      const compiled = compileLogic(data.server_logic, state, roomId, io);
+      if (error || !data) {
+        console.error("Error DB:", error);
+        return socket.emit("system_error", "Sala no encontrada o Error DB");
+      }
+      let state = {};
+      try {
+        state = data.game_state_data ? JSON.parse(data.game_state_data) : {};
+      } catch (e) {
+        console.error("Error parseando estado JSON DB");
+      }
 
       rooms[roomId] = {
         state: compiled.state,
@@ -477,9 +494,17 @@ io.on("connection", async (socket) => {
       };
 
       // GAME LOOP
+      let tickCount = 0;
       rooms[roomId].interval = setInterval(() => {
         const r = rooms[roomId];
         try {
+          // LOG DE DIAGNÓSTICO (Muestra 1 mensaje cada ~5 segundos)
+          tickCount++;
+          if (tickCount % 300 === 0) {
+            console.log(
+              `[Sala ${roomId}] Estado: Corriendo. Inputs: ${r.inputQueue.length}`
+            );
+          }
           // 1. INPUTS
           while (r.inputQueue.length > 0) {
             const input = r.inputQueue.shift();
@@ -549,8 +574,13 @@ io.on("connection", async (socket) => {
           // 4. RENDER
           if (r.renderFn) {
             const packet = r.renderFn();
+            // Si el paquete está corrupto, lo limpiamos
+            if(!packet) packet = { g:{}, e:[], fx:[] };
             io.to(roomId).emit("render_update", packet);
             r.state.effects = [];
+          }
+          else {
+             console.error(`[ALERTA] Sala ${roomId} no tiene renderFn!`);
           }
         } catch (e) {
           console.error(`Crash en sala ${roomId}:`, e.message);
@@ -561,7 +591,7 @@ io.on("connection", async (socket) => {
     const r = rooms[roomId];
     r.players.add(socket.id);
     socket.emit("map_data", r.state.bloques || []);
-    console.log(`[+] Jugador en ${roomId}`);
+    console.log(`[+] Jugador conectado a ${roomId}`);
   });
 
   // --- NUEVO: Protocolo Optimizado (Tick Rate) ---
