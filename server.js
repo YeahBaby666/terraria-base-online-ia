@@ -290,8 +290,18 @@ const createGameContext = (state, renderSys, network) => {
     // 1. ¿A quién va dirigido?
     // Si hay sender (es un actor), usamos sus canales 'out' o el target explícito.
     // Si sender es null (es el Game/Sistema), EL TARGET ES OBLIGATORIO.
-    let targets = [];
-
+    // 1. Determinar canales
+    let targetChannels = [];
+    if (explicitTarget) {
+      if (
+        !sender ||
+        (sender.channels && sender.channels.out.includes(explicitTarget))
+      ) {
+        targetChannels = [explicitTarget];
+      }
+    } else if (sender && sender.channels) {
+      targetChannels = sender.channels.out;
+    }
     // CASO A: SISTEMA (Game.emit)
     if (!sender) {
       if (explicitTarget) targets = [explicitTarget];
@@ -311,35 +321,52 @@ const createGameContext = (state, renderSys, network) => {
         targets = sender.channels.out;
       }
     }
-    // 3. Entrega del mensaje a los destinatarios
-    targets.forEach((groupName) => {
-      const list = state[groupName];
-      // --- FIX CRÍTICO: VALIDAR QUE SEA ARRAY ---
-      // Si list existe pero NO es un array (ej: objeto basura), salimos para evitar crash.
-      if (!list || !Array.isArray(list)) {
-        if (!sender && !list)
-          console.warn(`⚠️ El grupo '${groupName}' no existe.`);
-        // Si existe pero no es array, lo ignoramos silenciosamente
-        return;
-      }
 
-      // Recorremos todos los actores de ese grupo
-      for (const receiver of list) {
-        if (receiver._dead) continue;
+    //// 2. Procesar canales
+    targetChannels.forEach((channelName) => {
+      let groupsToScan = [];
 
-        // 3. FILTRO DE SINTONIZACIÓN
-        // El receptor DEBE tener el grupo en su lista 'in' para escuchar.
-        // Esto permite que haya "espias" o entidades sordas en el mismo grupo.
-        if (receiver.channels.in.includes(groupName)) {
-          receiver._receive(type, data);
-        }
-      }
-
-      if (!sender && deliveredCount > 0) {
-        console.log(
-          `✅ [Game.emit] Entregado a ${deliveredCount} actores en '${groupName}'`
+      // Determinar si es físico o virtual
+      if (state[channelName] && Array.isArray(state[channelName])) {
+        groupsToScan = [channelName];
+      } else {
+        // Broadcast virtual a todos los grupos válidos
+        groupsToScan = Object.keys(state).filter((k) =>
+          Array.isArray(state[k])
         );
       }
+
+      // 3. Repartir mensaje
+      groupsToScan.forEach((groupName) => {
+        const list = state[groupName];
+        if (!list || !Array.isArray(list)) return;
+
+        for (const receiver of list) {
+          if (receiver._dead) continue;
+
+          // --- FIX CRÍTICO: DETECTOR DE ZOMBIES ---
+          // Si el objeto existe pero no tiene la función _receive, es un dato corrupto de la DB.
+          if (typeof receiver._receive !== "function") {
+            // console.warn(`💀 Eliminando entidad Zombie en '${groupName}' (ID: ${receiver.id})`);
+            receiver._dead = true; // <--- LO MATAMOS PARA QUE EL MOTOR LO LIMPIE
+            continue;
+          }
+
+          // Si está vivo y funcional, comprobamos canales
+          if (
+            receiver.channels &&
+            receiver.channels.in &&
+            receiver.channels.in.includes(channelName)
+          ) {
+            receiver._receive(type, data);
+          }
+          if (!sender && deliveredCount > 0) {
+            console.log(
+              `✅ [Game.emit] Entregado a ${deliveredCount} actores en '${groupName}'`
+            );
+          }
+        }
+      });
     });
   };
   return {
