@@ -465,7 +465,47 @@ function compileLogic(serverLogic, initialState, roomId, ioInstance) {
   };
 
   const GameAPI = createGameContext(initialState, roomRender, networkBridge);
+  // --- NUEVA HERRAMIENTA: LIMPIADOR DE ESTADO ---
+  const StateCleaner = {
+    // 1. Borrar TODO (Reinicio de fábrica)
+    wipe: () => {
+      console.log("🔥 CLEANER: Ejecutando borrado total (Wipe)...");
+      for (const key in initialState) {
+        // No borramos funciones ni el sistema base (_sys)
+        if (key !== "_sys" && key !== "effects") {
+          delete initialState[key];
+        }
+      }
+      // Reiniciar effects
+      initialState.effects = [];
+      return true;
+    },
 
+    // 2. Limpiar un GRUPO específico (lo deja como array vacío [])
+    clearGroup: (groupName) => {
+      if (initialState[groupName]) {
+        // Si es array, lo vaciamos manteniendo la referencia
+        if (Array.isArray(initialState[groupName])) {
+          initialState[groupName].length = 0;
+        } else {
+          // Si es basura corrupta, lo forzamos a ser array nuevo
+          initialState[groupName] = [];
+        }
+        console.log(`🧹 CLEANER: Grupo '${groupName}' vaciado.`);
+      } else {
+        // Si no existe, lo creamos
+        initialState[groupName] = [];
+      }
+    },
+
+    // 3. Borrar una variable/propiedad específica
+    delete: (key) => {
+      if (initialState[key] !== undefined) {
+        delete initialState[key];
+        console.log(`🗑️ CLEANER: Propiedad '${key}' eliminada.`);
+      }
+    },
+  };
   const sandbox = {
     state: initialState,
     console: console,
@@ -474,6 +514,7 @@ function compileLogic(serverLogic, initialState, roomId, ioInstance) {
     Actor: GameAPI.Actor,
     Render: GameAPI.Render,
     FX: GameAPI.FX,
+    Cleaner: StateCleaner, // <--- AQUÍ ESTÁ TU NUEVA HERRAMIENTA
     MathUtils: {
       angle: (a, b) => Math.atan2(b.y - a.y, b.x - a.x),
       dist: (a, b) => Math.hypot(a.x - b.x, a.y - b.y),
