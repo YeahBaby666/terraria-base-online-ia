@@ -274,32 +274,42 @@ const createGameContext = (state, renderSys, network) => {
 
   // --- EL CORAZÓN DEL SISTEMA DE MENSAJES ---
   const dispatchMessage = (sender, type, data, explicitTarget) => {
+    // [DEBUG] Diagnóstico de Emisión
+    if (!sender) {
+      console.log(
+        `📢 [Game.emit] Intento enviar '${type}' a grupo '${explicitTarget}'`
+      );
+    }
     // 1. ¿A quién va dirigido?
     // Si hay sender (es un actor), usamos sus canales 'out' o el target explícito.
     // Si sender es null (es el Game/Sistema), EL TARGET ES OBLIGATORIO.
     let targets = [];
 
-    // 1. Remitente: SISTEMA (Game.emit)
+    // CASO A: SISTEMA (Game.emit)
     if (!sender) {
-      // El sistema necesita un target explícito, o no se envía a nadie
       if (explicitTarget) targets = [explicitTarget];
+      else console.warn("⚠️ Game.emit llamado sin Target (Grupo destino)");
     }
-    // 2. Remitente: ENTIDAD (me.emit)
+    // CASO B: ENTIDAD (me.emit)
     else {
       if (explicitTarget) {
-        // Verificar permisos de salida
         if (sender.channels.out.includes(explicitTarget)) {
           targets = [explicitTarget];
+        } else {
+          console.log(`⛔ ${sender.id} bloqueado al intentar hablar a '${explicitTarget}'`);
         }
       } else {
-        // Usar defaults
         targets = sender.channels.out;
       }
     }
     // 3. Entrega del mensaje a los destinatarios
     targets.forEach((groupName) => {
       const list = state[groupName];
-      if (!list) return;
+      // [DEBUG] Verificar si el grupo existe
+      if (!list) {
+          if(!sender) console.warn(`⚠️ [Game.emit] El grupo '${groupName}' no existe o está vacío.`);
+          return;
+      }
 
       // Recorremos todos los actores de ese grupo
       for (const receiver of list) {
@@ -311,6 +321,10 @@ const createGameContext = (state, renderSys, network) => {
         if (receiver.channels.in.includes(groupName)) {
           receiver._receive(type, data);
         }
+      }
+
+      if (!sender && deliveredCount > 0) {
+          console.log(`✅ [Game.emit] Entregado a ${deliveredCount} actores en '${groupName}'`);
       }
     });
   };
