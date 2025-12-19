@@ -57,9 +57,8 @@ class RenderCore {
   }
 
   processSnapshot(state, effects) {
+    const entitiesPacket = [];
     try {
-      const entitiesPacket = [];
-
       this.configs.forEach((config, typeName) => {
         const groupName = config.group;
 
