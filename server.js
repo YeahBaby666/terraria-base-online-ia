@@ -176,44 +176,148 @@ class UniverseCore {
     return res;
   }
 }
+/** * GESTOR DE IDENTIFICADORES
+ * Simple, rápido y seguro. Garantiza IDs únicos (1, 2, 3...).
+ */
+// ==========================================
+// 1. SISTEMA DE ACTORES Y CANALES (ARRAY MODIFICADO)
+// ==========================================
+let GLOBAL_ID = 1;
 
-/** HELPER: Actor Factory */
+// Helper para crear Arrays con superpoderes (.delete y .push único)
+const createChannelArray = (initialList) => {
+  // 1. Creamos el array base
+  const arr = [...initialList];
+
+  // 2. Añadimos método DELETE (Borrar por nombre)
+  // Uso: me.channels.in.delete('enemigos');
+  Object.defineProperty(arr, "delete", {
+    value: function (groupName) {
+      const index = this.indexOf(groupName);
+      if (index > -1) {
+        this.splice(index, 1); // Lo saca del array físicamente
+        return true;
+      }
+      return false;
+    },
+    enumerable: false, // Para que no salga en JSON.stringify
+  });
+
+  // 3. Sobreescribimos PUSH (Evitar duplicados)
+  // Uso: me.channels.out.push('enemigos'); -> Si ya existe, no hace nada
+  const originalPush = arr.push;
+  Object.defineProperty(arr, "push", {
+    value: function (...groupNames) {
+      groupNames.forEach((name) => {
+        if (!this.includes(name)) {
+          originalPush.call(this, name);
+        }
+      });
+      return this.length;
+    },
+    enumerable: false,
+  });
+
+  return arr;
+};
+
 const ActorFactory = {
   definitions: new Map(),
   define: (name, schema) => ActorFactory.definitions.set(name, schema),
-  create: (name, x, y, extra = {}, state) => {
+
+  create: (name, config = {}, behaviors = {}, state, dispatcher) => {
     const def = ActorFactory.definitions.get(name);
     if (!def) return null;
-    const ent = {
-      id: name + "_" + Math.random().toString(36).substr(2, 5),
-      x,
-      y,
-      vx: 0,
-      vy: 0,
-      w: 32,
-      h: 32,
-      _type: name,
-      ...JSON.parse(JSON.stringify(def.vars || {})),
-      ...extra,
-    };
-    if (def.onCreate) def.onCreate(ent);
 
+    // 1. Instancia Base
+    const entity = {
+      id: GLOBAL_ID++,
+      _type: name,
+      _dead: false,
+      ...JSON.parse(JSON.stringify(def.vars || {})),
+      ...config,
+
+      // 2. Canales Vitaminados (Arrays con .push y .delete)
+      channels: {
+        // 'in' escucha su grupo y 'all' por defecto
+        in: createChannelArray([...(def.channels?.in || []), "all"]),
+        // 'out' habla a sus definidos por defecto
+        out: createChannelArray([...(def.channels?.out || [])]),
+      },
+    };
+
+    // 3. Emitir y Recibir
+    entity.emit = (type, data, targetGroup = null) => {
+      dispatcher(entity, type, data, targetGroup);
+    };
+
+    entity._receive = (type, data) => {
+      const handler = behaviors[type];
+      if (handler) handler(entity, data);
+    };
+
+    // 4. Guardado
     const group = def.group || "default";
     if (!state[group]) state[group] = [];
-    if (Array.isArray(state[group])) state[group].push(ent);
-    return ent;
+    state[group].push(entity);
+
+    if (def.onCreate) def.onCreate(entity);
+    return entity;
   },
-  destroy: (ent) => {
-    ent._dead = true;
+
+  destroy: (e) => {
+    if (e) e._dead = true;
   },
 };
-
 // ====================================================================
 // --- 2. GAME CONTEXT & SANDBOX ---
 // ====================================================================
 
 const createGameContext = (state, renderSys, network) => {
   const layers = new Map();
+
+  // --- EL CORAZÓN DEL SISTEMA DE MENSAJES ---
+  const dispatchMessage = (sender, type, data, explicitTarget) => {
+    // 1. ¿A quién va dirigido?
+    // Si hay sender (es un actor), usamos sus canales 'out' o el target explícito.
+    // Si sender es null (es el Game/Sistema), EL TARGET ES OBLIGATORIO.
+    let targets = [];
+
+    // 1. Remitente: SISTEMA (Game.emit)
+    if (!sender) {
+      // El sistema necesita un target explícito, o no se envía a nadie
+      if (explicitTarget) targets = [explicitTarget];
+    }
+    // 2. Remitente: ENTIDAD (me.emit)
+    else {
+      if (explicitTarget) {
+        // Verificar permisos de salida
+        if (sender.channels.out.includes(explicitTarget)) {
+          targets = [explicitTarget];
+        }
+      } else {
+        // Usar defaults
+        targets = sender.channels.out;
+      }
+    }
+    // 3. Entrega del mensaje a los destinatarios
+    targets.forEach((groupName) => {
+      const list = state[groupName];
+      if (!list) return;
+
+      // Recorremos todos los actores de ese grupo
+      for (const receiver of list) {
+        if (receiver._dead) continue;
+
+        // 3. FILTRO DE SINTONIZACIÓN
+        // El receptor DEBE tener el grupo en su lista 'in' para escuchar.
+        // Esto permite que haya "espias" o entidades sordas en el mismo grupo.
+        if (receiver.channels.in.includes(groupName)) {
+          receiver._receive(type, data);
+        }
+      }
+    });
+  };
   return {
     layer: (g, s) => layers.set(g, new UniverseCore(s)),
     move: (g, dt) => {
@@ -229,16 +333,21 @@ const createGameContext = (state, renderSys, network) => {
         PhysicsCore.collideLayers(state[gA], layers.get(gB), cb);
     },
     find: (g) => state[g] || [],
+    // A. Gestión de Actores
     Actor: {
       define: ActorFactory.define,
-      create: (n, x, y, e) => ActorFactory.create(n, x, y, e, state),
+      create: (n, c, b) => ActorFactory.create(n, c, b, state, dispatchMessage),
       destroy: ActorFactory.destroy,
+    },
+    // --- AQUÍ ESTÁ EL CAMBIO DE ORDEN ---
+    // Ahora es igual que me.emit: (TIPO, DATA, TARGET)
+    emit: (type, data, targetGroup) => {
+      dispatchMessage(null, type, data, targetGroup);
     },
     Render: {
       type: (n, c) => renderSys.setup(n, c),
       config: (c) => {
         if (c.precision) renderSys.rounding = c.precision;
-        
       },
       setGlobal: (k, v) => renderSys.setGlobal(k, v), // Asegúrate de tener esto expuesto
     },
