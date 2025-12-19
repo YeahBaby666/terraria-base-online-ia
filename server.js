@@ -74,8 +74,6 @@ class RenderCore {
             // Empaquetado CRUDO: 't' en lugar de sprite
             const visual = { id: ent.id, t: config.sprite };
 
-            
-
             // Copiar propiedades numéricas con redondeo
             for (const prop of config.props) {
               const val = ent[prop];
@@ -510,7 +508,20 @@ io.on("connection", async (socket) => {
         // 1. INPUTS
         while (r.inputQueue.length > 0) {
           const input = r.inputQueue.shift();
-          if (r.logic.onInput) r.logic.onInput(input, r.state);
+          // [DEBUG] 3. ¿Se procesa?
+          console.log(
+            "⚡ Procesando Input:",
+            input.type,
+            input.key || input.value
+          );
+
+          if (r.logic.onInput) {
+            r.logic.onInput(input, r.state);
+          } else {
+            console.error(
+              "❌ ERROR: La lógica no tiene función 'onInput' definida."
+            );
+          }
         }
 
         // 2. GESTIÓN DE BOTS (Restaurado)
@@ -596,7 +607,13 @@ io.on("connection", async (socket) => {
 
   // --- NUEVO: Protocolo Optimizado (Tick Rate) ---
   socket.on("client_tick", (packet) => {
-    if (!socket.roomId || !rooms[socket.roomId]) return;
+    // [DEBUG] 1. ¿Llega el paquete?
+    console.log(`📩 Packet recibido de ${socket.id}:`, JSON.stringify(packet));
+
+    if (!socket.roomId || !rooms[socket.roomId]) {
+      console.warn(`⚠️ Rechazado: Socket ${socket.id} no tiene sala asignada.`);
+      return;
+    }
 
     const r = rooms[socket.roomId];
     const playerId = socket.userId || socket.id;
@@ -614,18 +631,19 @@ io.on("connection", async (socket) => {
     // 2. Acciones (FIX CRÍTICO AQUÍ)
     if (packet.actions && Array.isArray(packet.actions)) {
       for (const action of packet.actions) {
-        
         // Verificamos si payload es un objeto o un primitivo
         let data = {};
-        if (action.payload && typeof action.payload === 'object') {
-             data = action.payload; // Es objeto, usamos spread
+        if (action.payload && typeof action.payload === "object") {
+          data = action.payload; // Es objeto, usamos spread
         } else {
-             data = { value: action.payload }; // Es texto/número, lo envolvemos
+          data = { value: action.payload }; // Es texto/número, lo envolvemos
         }
+        // [DEBUG] 2. ¿Se encola la acción?
+        console.log(`✅ Encolando acción [${action.type}] para ${playerId}`);
 
         r.inputQueue.push({
           type: action.type,
-          ...data,       // Ahora data siempre es un objeto seguro
+          ...data, // Ahora data siempre es un objeto seguro
           id: playerId,
         });
       }
