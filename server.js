@@ -5,757 +5,665 @@ const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const nodeFetch = require("node-fetch");
 
 // ====================================================================
 // --- CONFIGURACIÓN ---
 // ====================================================================
-const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:3000";
-const SUPABASE_URL = process.env.SUPABASE_URL || "TU_SUPABASE_URL";
-const SUPABASE_KEY = process.env.SUPABASE_KEY || "TU_SUPABASE_KEY";
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "TU_GEMINI_KEY";
-
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const PORT = process.env.PORT || 3000;
+const SUPABASE_URL =
+  process.env.SUPABASE_URL || "https://uucetvaiesfwuxmwukvg.supabase.co";
+const SUPABASE_KEY =
+  process.env.SUPABASE_KEY ||
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV1Y2V0dmFpZXNmd3V4bXd1a3ZnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU3MzEzMjUsImV4cCI6MjA4MTMwNzMyNX0.B6abitvRPUeZPPFUiqYhXf0MsBx2bRpJMz3wPgyKfbE";
+const GEMINI_API_KEY =
+  process.env.GEMINI_API_KEY || "AIzaSyBFPuZlt6z1cM55IYVEahV6uLLkuqhBFYE";
 
 const app = express();
 app.use(cors({ origin: "*", methods: ["GET", "POST", "OPTIONS"] }));
 app.use(bodyParser.json());
 
-const PORT = process.env.PORT || 3000;
-const httpServer = app.listen(PORT, () => {
-  console.log(`🚀 Servidor Engine IO (Full Stack) en puerto ${PORT}`);
-});
-
+const httpServer = app.listen(PORT, () =>
+  console.log(`🚀 Motor (Hot Reload Ready) en puerto ${PORT}`)
+);
 const io = new Server(httpServer, { cors: { origin: "*" } });
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 const rooms = {};
 
 // ====================================================================
-// --- 1. MOTORES DEL NÚCLEO (ARQUITECTURA DE CAPAS) ---
+// --- 1. SIGNAL HUB ---
 // ====================================================================
 
-/** RENDER CORE: Gestor de Vista (Versión Estable) */
-class RenderCore {
+class SignalHub {
   constructor() {
-    this.configs = new Map();
-    this.globals = {};
-    this.rounding = 1;
+    this.channels = new Map();
+    this.globalId = 1;
   }
 
-  setup(typeName, config) {
-    // console.log(`[Render Setup] Registrado tipo: '${typeName}' en grupo: '${config.group}'`);
-    this.configs.set(typeName, {
-      sprite: "default",
-      props: ["x", "y"],
-      map: null,
-      group: typeName.toLowerCase() + "s",
-      ...config,
+  subscribe(entity, list) {
+    list.forEach((ch) => {
+      if (!this.channels.has(ch)) this.channels.set(ch, new Set());
+      this.channels.get(ch).add(entity);
     });
   }
 
-  setGlobal(key, value) {
-    this.globals[key] = value;
+  // DESCONEXIÓN DE UN SOLO CANAL
+  unsubscribeFrom(entity, channel) {
+    const subs = this.channels.get(channel);
+    if (subs) {
+      subs.delete(entity);
+      // Si el canal queda vacío, lo eliminamos para ahorrar RAM
+      if (subs.size === 0) this.channels.delete(channel);
+    }
   }
 
-  processSnapshot(state, effects) {
-    const entitiesPacket = [];
+  dispatch(sender, signal, data, target) {
+    const deliver = (recipient) => {
+      // Ya no chequeamos isDead, solo si puede recibir
+      if (typeof recipient.receive === "function") {
+        recipient.receive(signal, data, sender);
+      }
+    };
 
-    // [DEBUG] Diagnóstico rápido (solo si hay configs pero no sale nada)
-    if (this.configs.size === 0)
-      console.warn(
-        "[Render] ⚠️ No hay configuraciones visuales (Game.Render.type)"
-      );
-    // [DEBUG] Diagnóstico rápido (solo si hay configs pero no sale nada)
-    if (this.configs.size === 0)
-      console.warn(
-        "[Render] ⚠️ No hay configuraciones visuales (Game.Render.type)"
-      );
-
-    try {
-      this.configs.forEach((config, typeName) => {
-        const groupName = config.group;
-        const list = state[groupName];
-
-        // [DEBUG] Chequeo de existencia
-        if (!list) {
-          console.log(`[Render] Grupo '${groupName}' no existe en state.`);
-          return;
-        }
-        if (!Array.isArray(list)) {
-          console.log(`[Render] Grupo '${groupName}' no es Array.`);
-          return;
-        }
-        if (list.length > 0)
-          console.log(
-            `[Render] Grupo '${groupName}' tiene ${list.length} entidades.`
-          );
-
-        if (list && Array.isArray(list)) {
-          for (const ent of list) {
-            // FILTRO DE MUERTOS
-            if (ent._dead) continue;
-
-            // 1. Construir objeto visual
-            const visual = { id: ent.id, t: config.sprite };
-
-            // 2. Copiar propiedades
-            for (const prop of config.props) {
-              const val = ent[prop];
-              if (typeof val === "number") {
-                visual[prop] = Number(val.toFixed(this.rounding));
-              } else {
-                visual[prop] = val;
-              }
-            }
-
-            // 3. Mapas extra
-            if (config.map) {
-              try {
-                Object.assign(visual, config.map(ent));
-              } catch (e) {}
-            }
-
-            entitiesPacket.push(visual);
-          }
-        }
+    if (target) {
+      const subs = this.channels.get(target);
+      if (subs) [...subs].forEach(deliver);
+    } else if (sender && sender.channelsOut) {
+      sender.channelsOut.forEach((ch) => {
+        const subs = this.channels.get(ch);
+        if (subs)
+          [...subs].forEach((r) => {
+            if (r !== sender) deliver(r);
+          });
       });
-    } catch (error) {
-      console.error("CRITICAL RENDER ERROR:", error);
-      // En caso de emergencia, devolver paquete vacío para no colgar al cliente
-      return { error: "Render failed", g: {}, e: [], fx: [] };
     }
-
-    // [DEBUG] Salida final
-    if (entitiesPacket.length === 0 && Object.keys(state).length > 2) {
-      console.warn("[Render] ⚠️ Paquete vacío aunque hay estado.");
-    }
-    // Retorna: e (entities), g (globals), fx (effects)
-    return { g: this.globals, e: entitiesPacket, fx: effects || [] };
   }
 }
-
-/** PHYSICS CORE: Lógica de movimiento y colisión */
-const PhysicsCore = {
-  overlaps: (a, b) =>
-    a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y,
-
-  updateLayer: function (entities, layerGrid, dt) {
-    if (!entities) return;
-    if (layerGrid) layerGrid.clear();
-    for (const ent of entities) {
-      if (ent._dead) continue;
-      ent.x += (ent.vx || 0) * dt;
-      ent.y += (ent.vy || 0) * dt;
-      if (layerGrid) layerGrid.add(ent);
-    }
-  },
-
-  collideLayers: function (entitiesA, layerGridB, cb) {
-    if (!entitiesA || !layerGridB) return;
-    for (const a of entitiesA) {
-      if (a._dead) continue;
-      const nearby = layerGridB.query(a.x, a.y, a.w || 32, a.h || 32);
-      for (const b of nearby) {
-        if (b === a || b._dead) continue;
-        if (this.overlaps(a, b)) cb(a, b);
-      }
-    }
-  },
-};
-
-/** UNIVERSE CORE: Sistema de Rejilla */
-class UniverseCore {
-  constructor(cellSize) {
-    this.cellSize = cellSize || 100;
-    this.grid = new Map();
-  }
-  clear() {
-    this.grid.clear();
-  }
-  add(obj) {
-    const w = obj.w || 32;
-    const h = obj.h || 32;
-    const sx = Math.floor(obj.x / this.cellSize);
-    const ex = Math.floor((obj.x + w) / this.cellSize);
-    const sy = Math.floor(obj.y / this.cellSize);
-    const ey = Math.floor((obj.y + h) / this.cellSize);
-    for (let x = sx; x <= ex; x++) {
-      for (let y = sy; y <= ey; y++) {
-        const k = `${x},${y}`;
-        if (!this.grid.has(k)) this.grid.set(k, []);
-        this.grid.get(k).push(obj);
-      }
-    }
-  }
-  query(x, y, w, h) {
-    const res = new Set();
-    const sx = Math.floor(x / this.cellSize);
-    const ex = Math.floor((x + w) / this.cellSize);
-    const sy = Math.floor(y / this.cellSize);
-    const ey = Math.floor((y + h) / this.cellSize);
-    for (let x = sx; x <= ex; x++) {
-      for (let y = sy; y <= ey; y++) {
-        const cell = this.grid.get(`${x},${y}`);
-        if (cell) for (const obj of cell) res.add(obj);
-      }
-    }
-    return res;
-  }
-}
-/** * GESTOR DE IDENTIFICADORES
- * Simple, rápido y seguro. Garantiza IDs únicos (1, 2, 3...).
- */
-// ==========================================
-// 1. SISTEMA DE ACTORES Y CANALES (ARRAY MODIFICADO)
-// ==========================================
-let GLOBAL_ID = 1;
-
-// Helper para crear Arrays con superpoderes (.delete y .push único)
-const createChannelArray = (initialList) => {
-  // 1. Creamos el array base
-  const arr = [...initialList];
-
-  // 2. Añadimos método DELETE (Borrar por nombre)
-  // Uso: me.channels.in.delete('enemigos');
-  Object.defineProperty(arr, "delete", {
-    value: function (groupName) {
-      const index = this.indexOf(groupName);
-      if (index > -1) {
-        this.splice(index, 1); // Lo saca del array físicamente
-        return true;
-      }
-      return false;
-    },
-    enumerable: false, // Para que no salga en JSON.stringify
-  });
-
-  // 3. Sobreescribimos PUSH (Evitar duplicados)
-  // Uso: me.channels.out.push('enemigos'); -> Si ya existe, no hace nada
-  const originalPush = arr.push;
-  Object.defineProperty(arr, "push", {
-    value: function (...groupNames) {
-      groupNames.forEach((name) => {
-        if (!this.includes(name)) {
-          originalPush.call(this, name);
-        }
-      });
-      return this.length;
-    },
-    enumerable: false,
-  });
-
-  return arr;
-};
 // ====================================================================
-// --- 2. GAME CONTEXT & SANDBOX (CORREGIDO: DEEP COPIES & FACTORY) ---
+// --- 2. GAME CONTEXT ---
 // ====================================================================
+const createGameContext = (state, renderState, roomId) => {
+  // 2. VARIABLES GLOBALES DE APOYO
+  let allEntities = []; // Lista maestra para el cleanup
+  let localEntityId = 1;
+  const definitions = new Map(); // <--- AÑADE ESTA LÍNEA AQUÍ
+  const hub = new SignalHub();
 
-const createGameContext = (state, renderSys, network) => {
-  // MEMORIA DE ALTO RENDIMIENTO (Fuera del State JSON)
-  const EngineGroups = new Map();
-  const definitions = new Map();
+  class Entity {
+    // AHORA RECIBE: onCanal (Entrada) y outCanal (Salida)
+    constructor(
+      grupo,
+      varsIniciales,
+      hub,
+      onCanal = [],
+      outCanal = [],
+      destructedAutomatic = false
+    ) {
+      this.id = localEntityId++;
+      this.grupo = grupo;
+      this.hub = hub;
 
-  // --- UTILS: DEEP COPY ---
-  const clone = (obj) => JSON.parse(JSON.stringify(obj));
+      this.vars = JSON.parse(JSON.stringify(varsIniciales || {}));
+      this.renderData = {
+        id: this.id,
+        grupo: this.grupo,
+        ...this.vars,
+      };
 
-  // --- SINCRONIZADOR DE GRUPO (Engine -> State) ---
-  const syncToState = (groupName) => {
-    if (!EngineGroups.has(groupName)) return;
-    // Solo pasamos al state los datos necesarios para el Render/DB
-    state[groupName] = EngineGroups.get(groupName).map((actor) => {
-      const { _receive, emit, ...data } = actor; // Quitamos funciones
-      return data;
-    });
-  };
+      // --- CANALES DE ENTRADA (Suscripciones) ---
+      // 1. Su propio grupo (siempre escucha a sus pares).
+      // 2. 'global' (siempre escucha al Game/Dios).
+      // 3. onCanal (definidos por el usuario).
+      this.channelsIn = [this.grupo, "global", ...onCanal];
 
-  const dispatchMessage = (sender, type, data, explicitTarget) => {
-    // Buscamos en los EngineGroups (Memoria viva)
-    EngineGroups.forEach((actors, groupName) => {
-      // Si hay target explícito y no es este grupo, saltar
-      if (explicitTarget && explicitTarget !== groupName) return;
+      // --- CANALES DE SALIDA (Despacho) ---
+      // 1. Su propio grupo.
+      // 2. 'global' (puede gritarle a todos).
+      // 3. outCanal (definidos por el usuario).
+      this.channelsOut = [this.grupo, "global", ...outCanal];
 
-      for (const receiver of actors) {
-        if (receiver._dead) continue;
+      this.writingAllowed = false;
+      this.destructedAutomatic = destructedAutomatic;
 
-        // Filtro de canal
-        // Si el actor tiene la función, le entregamos el mensaje.
-        // Esto asegura que 'tick' llegue siempre.
-        if (typeof actor._receive === "function") {
-          actor._receive(type, data);
-        }
+      // Solo nos suscribimos a los de ENTRADA
+      this.hub.subscribe(this, this.channelsIn);
+    }
+
+    /**
+     * Sincroniza explícitamente el estado de la sala con esta instancia.
+     * Se usa en el Actor.create justo después de instanciar.
+     */
+    vincularEstados(stateArray, renderArray) {
+      stateArray.push(this.vars);
+      renderArray.push(this.renderData);
+    }
+
+    // --- MODIFICADORES (Sincronización por Referencia) ---
+    // Al modificar this.vars[k], se actualiza automáticamente el objeto dentro del array del state
+
+    setVar(k, v, r = true) {
+      if (!this.writingAllowed) return;
+      this.vars[k] = v;
+      if (r) this.renderData[k] = v;
+    }
+
+    deleteVar(k, r = true) {
+      if (!this.writingAllowed) return;
+      delete this.vars[k];
+      if (r) delete this.renderData[k];
+    }
+
+    setRender(k, v, r = false) {
+      if (!this.writingAllowed) return;
+      this.renderData[k] = v;
+      if (r) this.vars[k] = v;
+    }
+
+    deleteRender(k, r = false) {
+      if (!this.writingAllowed) return;
+      delete this.renderData[key];
+      if (reflect) delete this.vars[key];
+    }
+
+    setDestructedAutomatic(v) {
+      if (!this.writingAllowed) return;
+      this.destructedAutomatic = !!v;
+      if (this.destructedAutomatic && this.channelsIn.length === 0)
+        this.selfDestruct();
+    }
+
+    // --- CANALES Y DESTRUCCIÓN ---
+    pushChannel(tipo, nombre) {
+      const target = tipo === "in" ? this.channelsIn : this.channelsOut;
+      if (!target.includes(nombre)) {
+        target.push(nombre);
+        if (tipo === "in") this.hub.subscribe(this, [nombre]);
       }
-    });
-  };
-  return {
-    layer: (g, s) => layers.set(g, new UniverseCore(s)),
-    move: (g, dt) => {
-      const entities = state[g];
-      if (Array.isArray(entities)) {
-        for (let i = entities.length - 1; i >= 0; i--)
-          if (entities[i]._dead) entities.splice(i, 1);
-      }
-      PhysicsCore.updateLayer(entities, layers.get(g), dt);
-    },
-    collide: (gA, gB, cb) => {
-      if (state[gA] && layers.get(gB))
-        PhysicsCore.collideLayers(state[gA], layers.get(gB), cb);
-    },
-    find: (g) => state[g] || [],
-    // A. Gestión de Actores
-    Actor: {
-      define: (typeName, config, logic) => {
-        definitions.set(typeName, { config, logic });
-      },
-      create: (typeName, instConfig) => {
-        const def = definitions.get(typeName);
-        if (!def) return;
-
-        // 1. CLONACIÓN REAL (Independencia total de referencia)
-        const baseVars = def.config.vars ? clone(def.config.vars) : {};
-        const instVars = instConfig.vars ? clone(instConfig.vars) : {};
-        const baseChannels = def.config.channels
-          ? clone(def.config.channels)
-          : { in: [], out: [] };
-
-        const entity = {
-          id: Math.random().toString(36).substr(2, 9),
-          _type: typeName,
-          _dead: false,
-          x: instConfig.x || 0,
-          y: instConfig.y || 0,
-          ...baseVars,
-          ...instVars,
-          channels: {
-            in: [...(instConfig.channels?.in || baseChannels.in || [])],
-            out: [...(instConfig.channels?.out || baseChannels.out || [])],
-          },
-        };
-
-        // 2. VINCULACIÓN DE LÓGICA (Solo en Engine)
-        entity._receive = (type, data) => {
-          if (def.logic && def.logic[type]) def.logic[type](entity, data);
-        };
-        entity.emit = (type, data, target) =>
-          dispatchMessage(entity, type, data, target);
-
-        // 3. REGISTRO EN ENGINE
-        const gName = instConfig.group || def.config.group || "default";
-        if (!EngineGroups.has(gName)) EngineGroups.set(gName, []);
-        EngineGroups.get(gName).push(entity);
-
-        return entity;
-      },
-      // ESTA ES LA FUNCIÓN QUE FALTA:
-      destroy: (entity) => {
-        if (entity) entity._dead = true;
-      },
-    },
-    // --- AQUÍ ESTÁ EL CAMBIO DE ORDEN ---
-    // Ahora es igual que me.emit: (TIPO, DATA, TARGET)
-    emit: (type, data, targetGroup) => {
-      dispatchMessage(null, type, data, targetGroup);
-    },
-    // --- ESTA FUNCIÓN SE LLAMA AL FINAL DEL LOOP ---
-    updateStateMirror: () => {
-      EngineGroups.forEach((actors, gName) => {
-        // Limpieza de muertos en Engine
-        const alive = actors.filter((a) => !a._dead);
-        EngineGroups.set(gName, alive);
-        // Volcado a State para persistencia y render
-        syncToState(gName);
-      });
-    },
-    Render: {
-      type: (n, c) => renderSys.setup(n, c),
-      config: (c) => {
-        if (c.precision) renderSys.rounding = c.precision;
-      },
-      setGlobal: (k, v) => renderSys.setGlobal(k, v), // Asegúrate de tener esto expuesto
-    },
-    FX: {
-      spawn: (t, x, y) => {
-        if (!state.effects) state.effects = [];
-        state.effects.push({ type: t, x, y, id: Math.random() });
-      },
-    },
-    sendTo: network.sendTo,
-    broadcast: network.broadcast,
-  };
-};
-
-function compileLogic(serverLogic, initialState, roomId, ioInstance) {
-  // Protección contra lógica vacía o nula
-  const safeLogic = serverLogic || "// Lógica vacía por defecto";
-  // 1. Inicializar Sistema de Control (_sys) para Bots
-  if (!initialState.effects) initialState.effects = [];
-  if (!initialState._sys)
-    Object.defineProperty(initialState, "_sys", {
-      value: { spawnQueue: [], killQueue: [] },
-      writable: true,
-      enumerable: false,
-    });
-
-  const roomRender = new RenderCore();
-
-  const networkBridge = {
-    sendTo: (sid, type, data) =>
-      ioInstance.to(sid).emit("custom_event", { type, data }),
-    broadcast: (type, data) =>
-      ioInstance.to(roomId).emit("custom_event", { type, data }),
-  };
-
-  const GameAPI = createGameContext(initialState, roomRender, networkBridge);
-  // --- NUEVA HERRAMIENTA: LIMPIADOR DE ESTADO ---
-  const StateCleaner = {
-    // 1. Borrar TODO (Reinicio de fábrica)
-    wipe: () => {
-      console.log("🔥 CLEANER: Ejecutando borrado total (Wipe)...");
-      for (const key in initialState) {
-        // No borramos funciones ni el sistema base (_sys)
-        if (key !== "_sys" && key !== "effects") {
-          delete initialState[key];
-        }
-      }
-      // Reiniciar effects
-      initialState.effects = [];
-      return true;
-    },
-
-    // 2. Limpiar un GRUPO específico (lo deja como array vacío [])
-    clearGroup: (groupName) => {
-      if (initialState[groupName]) {
-        // Si es array, lo vaciamos manteniendo la referencia
-        if (Array.isArray(initialState[groupName])) {
-          initialState[groupName].length = 0;
-        } else {
-          // Si es basura corrupta, lo forzamos a ser array nuevo
-          initialState[groupName] = [];
-        }
-        console.log(`🧹 CLEANER: Grupo '${groupName}' vaciado.`);
+    }
+    deleteChannel(tipo, nombre) {
+      if (tipo === "in") {
+        this.channelsIn = this.channelsIn.filter((c) => c !== nombre);
+        this.hub.unsubscribeFrom(this, nombre);
+        if (this.destructedAutomatic && this.channelsIn.length === 0)
+          this.selfDestruct();
       } else {
-        // Si no existe, lo creamos
-        initialState[groupName] = [];
+        this.channelsOut = this.channelsOut.filter((c) => c !== nombre);
+      }
+    }
+
+    selfDestruct() {
+      // Aislamiento
+      [...this.channelsIn].forEach((ch) => this.hub.unsubscribeFrom(this, ch));
+      this.channelsIn = [];
+      this.channelsOut = [];
+
+      // Eliminación quirúrgica del GameAPI
+      if (typeof Game !== "undefined" && Game.cleanup) {
+        Game.cleanup(this);
+      }
+    }
+
+    // --- CEREBRO Y RED ---
+
+    // Solo aseguramos que receive busque en definitions global
+    receive(s, d, e) {
+      const def = definitions.get(this.grupo);
+      const behavior = def ? def.logic : null;
+
+      if (behavior && behavior[s]) {
+        this.writingAllowed = true;
+        try {
+          behavior[s](this, d, e);
+        } catch (err) {
+          console.error(`Error en ${this.grupo}:`, err);
+        }
+        this.writingAllowed = false;
+      }
+    }
+
+    emit(s, d, c) {
+      if (c) this.hub.dispatch(this, s, d, c);
+      else this.channelsOut.forEach((ch) => this.hub.dispatch(this, s, d, ch));
+    }
+  }
+
+  const GameAPI = {
+    Actor: {
+      // AHORA: 'type' es el identificador único y el nombre del grupo en el state
+      define: (type, config, logic) => {
+        // Guardamos la definición usando el 'type' como clave
+        definitions.set(type, { config, logic });
+
+        // Inicializamos los arrays en el state inmediatamente con ese nombre
+        if (!state[type]) state[type] = [];
+        if (!renderState[type]) renderState[type] = [];
+      },
+      create: (type, instVars = {}, autoDestruct = false) => {
+        const def = definitions.get(type);
+        if (!def) {
+          console.warn(
+            `⚠️ ADVERTENCIA: Intentaste crear el actor '${type}', pero no existe.`
+          );
+          console.warn(
+            `   ¿Quizás cambiaste el nombre en .define() y olvidaste el .create()?`
+          );
+          // Retornamos un objeto "Dummy" inofensivo para que el código siguiente no falle
+          return {
+            id: -1,
+            setVar: () => {},
+            emit: () => {},
+            error: true,
+          };
+        }
+
+        // --- EXTRACCIÓN DE CANALES ---
+        const onList = def.config.onCanal || [];
+        const outList = def.config.outCanal || [];
+
+        // Instanciar pasando las dos listas
+        const entity = new Entity(
+          type, // <--- AQUÍ ESTÁ EL CAMBIO: El tipo ES el grupo
+          { ...def.config.vars, ...instVars },
+          hub,
+          onList,
+          outList,
+          autoDestruct
+        );
+
+        // Wrapper de Seguridad (Mapeo)
+        const wrapper = {
+          id: entity.id,
+          grupo: entity.grupo,
+          vars: entity.vars,
+          renderData: entity.renderData,
+          setVar: (k, v, r) => entity.setVar(k, v, r),
+          deleteVar: (k, r) => entity.deleteVar(k, r),
+          setRender: (k, v, r) => entity.setRender(k, v, r),
+          deleteRender: (k, r) => entity.deleteRender(k, r),
+          pushChannel: (t, n) => entity.pushChannel(t, n),
+          deleteChannel: (t, n) => entity.deleteChannel(t, n),
+          selfDestruct: () => entity.selfDestruct(),
+          emit: (s, d, c) => entity.emit(s, d, c),
+          receive: (s, d, e) => entity.receive(s, d, e),
+          setDestructedAutomatic: (v) => entity.setDestructedAutomatic(v),
+        };
+
+        entity.vincularEstados(state[type], renderState[type]);
+        allEntities.push(entity);
+
+        return wrapper;
+      },
+    },
+    // FUNCIÓN DE LIMPIEZA MANUAL (Invocable desde la lógica)
+    /**
+     * Limpieza selectiva o general
+     * @param {Entity} target - (Opcional) La entidad a eliminar específicamente
+     */
+    cleanup: (target = null) => {
+      try {
+        if (target) {
+          // --- ELIMINACIÓN QUIRÚRGICA ---
+          const g = target.grupo;
+
+          // Validamos que el grupo exista en el state antes de filtrar
+          if (state && state[g]) {
+            state[g] = state[g].filter((v) => v !== target.vars);
+          }
+
+          // Validamos que el grupo exista en el renderState antes de filtrar
+          if (renderState && renderState[g]) {
+            renderState[g] = renderState[g].filter(
+              (r) => r !== target.renderData
+            );
+          }
+
+          // Eliminar de la lista maestra global de la sala
+          allEntities = allEntities.filter((e) => e !== target);
+        } else {
+          // --- LIMPIEZA GENERAL (BASURA) ---
+          // Solo consideramos "vivos" a los que tienen canales de entrada
+          const vivos = allEntities.filter(
+            (e) => e.channelsIn && e.channelsIn.length > 0
+          );
+          const idsVivos = new Set(vivos.map((e) => e.id));
+
+          Object.keys(state).forEach((grupo) => {
+            if (Array.isArray(state[grupo])) {
+              state[grupo] = state[grupo].filter((vars) => {
+                const ent = allEntities.find((e) => e.vars === vars);
+                return ent && idsVivos.has(ent.id);
+              });
+            }
+
+            // Seguridad crítica: solo filtramos si renderState[grupo] es un Array
+            if (renderState[grupo] && Array.isArray(renderState[grupo])) {
+              renderState[grupo] = renderState[grupo].filter((render) =>
+                idsVivos.has(render.id)
+              );
+            }
+          });
+
+          allEntities = vivos;
+        }
+      } catch (err) {
+        console.error("❌ Error en cleanup quirúrgico:", err.message);
+      }
+    },
+    getBehavior: (grupo) => {
+      const def = definitions.get(grupo);
+      return def ? def.logic : null;
+    },
+    // --- PILAR 2: BD (Persistencia) ---
+    BD: {
+      save: async () => {
+        const json = JSON.stringify(state);
+        await supabase
+          .from("game_rooms")
+          .update({ game_state_data: json })
+          .eq("name", roomId);
+        console.log(`💾 [BD] Sala ${roomId} guardada.`);
+      },
+    },
+
+    // --- PILAR 3: IA ---
+    AI: async (prompt, model = "gemini-2.5-flash") => {
+      try {
+        const r = await genAI
+          .getGenerativeModel({ model })
+          .generateContent(prompt);
+        return r.response.text();
+      } catch (e) {
+        return "Error IA";
       }
     },
 
-    // 3. Borrar una variable/propiedad específica
-    delete: (key) => {
-      if (initialState[key] !== undefined) {
-        delete initialState[key];
-        console.log(`🗑️ CLEANER: Propiedad '${key}' eliminada.`);
-      }
-    },
-  };
-  const sandbox = {
-    state: initialState,
-    console: console,
-    fetch: nodeFetch, // Necesario para IA
-    Game: GameAPI,
-    Actor: GameAPI.Actor,
-    Render: GameAPI.Render,
-    FX: GameAPI.FX,
-    Cleaner: StateCleaner, // <--- AQUÍ ESTÁ TU NUEVA HERRAMIENTA
-    MathUtils: {
-      angle: (a, b) => Math.atan2(b.y - a.y, b.x - a.x),
-      dist: (a, b) => Math.hypot(a.x - b.x, a.y - b.y),
-      randomRange: (min, max) => Math.random() * (max - min) + min,
-    },
-    // --- RESTAURADO: IA ---
-    AI: async function (prompt, model = "gemini-2.5-flash") {
-      const url = `${API_BASE_URL}/api/ai/generate`;
-      try {
-        const response = await nodeFetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt, model }),
-        });
-        const data = await response.json();
-        return data.response || data.error;
-      } catch (e) {
-        return "Error IA: " + e.message;
-      }
-    },
-    // --- RESTAURADO: BOT HELPERS ---
+    // --- PILAR 4: BOT ---
     Bot: {
       create: (config) => {
-        const id = "bot_" + Math.random().toString(36).substr(2, 5);
-        initialState._sys.spawnQueue.push({ id, config });
-        return id;
+        state._sys.spawnQueue.push({ config });
+        return "pending";
       },
-      destroy: (id) => initialState._sys.killQueue.push(id),
     },
+    // ... otros métodos
+    broadcast: (signal, data) => {
+      io.to(roomId).emit(signal, data);
+    },
+
+    emit: (sig, dat, ch) => hub.dispatch(null, sig, dat, ch || "global"),
+  };
+  // IMPORTANTE: Para que la clase Entity (que es global) vea a Game
+  global.Game = GameAPI;
+  // Devolvemos también allEntities y la clase Entity para que el compilador las use
+  return { GameAPI, EntityClass: Entity, allEntitiesRef: allEntities };
+};
+
+// ====================================================================
+// --- 3. COMPILADOR ---
+// ====================================================================
+function compileLogic(serverLogic, initialState, roomId) {
+  if (!initialState) initialState = {};
+  if (!initialState._sys) initialState._sys = { spawnQueue: [] };
+  // 1. Crear el contenedor vacío para el render
+  let renderState = {};
+
+  // Obtenemos el contexto aislado
+  const { GameAPI, EntityClass, allEntitiesRef } = createGameContext(
+    initialState,
+    renderState,
+    roomId
+  );
+
+  const sandbox = {
+    state: initialState,
+    renderState,
+    Entity: EntityClass, // <--- Usamos la clase local
+    Game: GameAPI,
+    Actor: GameAPI.Actor,
+    BD: GameAPI.BD,
+    AI: GameAPI.AI,
+    Bot: GameAPI.Bot, // --- INYECTAR FUNCIONES DE TIEMPO ---
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    console,
+    Math,
   };
 
   const code = `
-        try {
-            ${safeLogic}
-        } catch (err) {
-            console.error("Runtime Error en lógica de usuario:", err);
+        try { ${
+          serverLogic || ""
+        } } catch(e) { // Esto captura errores síncronos al EJECUTAR el script por primera vez
+            console.error("❌ Error de Sintaxis/Ejecución inicial en Lógica Usuario:", e.message);
+            throw e; // Relanzamos para que lo capture el bloque de abajo
         }
-        ;({
+        ({
             onUpdate: (typeof onUpdate !== 'undefined' ? onUpdate : null),
-            onInput: (typeof onInput !== 'undefined' ? onInput : null),
-            onBot: (typeof onBot !== 'undefined' ? onBot : null)
+            onInput: (typeof onInput !== 'undefined' ? onInput : null)
         })
     `;
 
   try {
     const userLogic = new vm.Script(code).runInNewContext(sandbox);
-    console.log(`✅ Lógica compilada para sala ${roomId}`);
+    // 3. RETORNAR TODO EL PAQUETE (Incluyendo el renderState)
     return {
       userLogic,
       state: initialState,
-      renderFn: () =>
-        roomRender.processSnapshot(initialState, initialState.effects),
+      renderState, // <--- FUNDAMENTAL: Ahora join_room podrá guardarlo
+      GameAPI,
+      allEntities: allEntitiesRef, // Devolvemos la referencia para el loop principal
     };
   } catch (e) {
-    console.error("❌ Error FATAL compilando lógica:", e.message);
+    console.error("🚨 LA SALA NO SE ACTUALIZÓ POR ERROR DE CÓDIGO 🚨");
+    console.error(e.message);
+
+    // 🛡️ BLINDAJE 3: Devolver lógica vacía segura en lugar de romper
     return {
+      userLogic: {
+        onUpdate: () => {}, // Función vacía
+        onInput: () => {}, // Función vacía
+      },
       state: initialState,
-      userLogic: {},
-      renderFn: () => ({ g: { error: "Logic Compile Error" }, e: [], fx: [] }),
+      renderState,
+      GameAPI,
+      allEntities: allEntitiesRef,
     };
   }
 }
 
 // ====================================================================
-// --- 4. GESTIÓN DE SALAS Y SOCKETS ---
+// --- 4. LOOP & SOCKETS ---
 // ====================================================================
-
-io.on("connection", async (socket) => {
-  socket.on("join_room", async (roomId, userId) => {
+io.on("connection", (socket) => {
+  socket.on("join_room", async (roomId, userName) => {
     socket.join(roomId);
     socket.roomId = roomId;
-    socket.userId = userId;
-
-    // --- CORRECCIÓN AQUÍ ---
-    // Debes extraer 'error' también, no solo 'data'
-    const { data, error } = await supabase
+    socket.userId = userName || socket.id; // También asegura el ID
+    console.log(`👤 Usuario conectado: ${socket.userId} en sala ${roomId}`);
+    // --- AÑADIR ESTO: CANCELAR HIBERNACIÓN ---
+    if (rooms[roomId] && rooms[roomId].hibernationTimeout) {
+      console.log(
+        `⚡ Cliente reconectado. Cancelando hibernación de ${roomId}.`
+      );
+      clearTimeout(rooms[roomId].hibernationTimeout);
+      delete rooms[roomId].hibernationTimeout;
+    }
+    const { data } = await supabase
       .from("game_rooms")
       .select("*")
       .eq("name", roomId)
       .single();
-    if (error || !data) {
-      console.error("Error DB:", error);
-      return socket.emit("system_error", "Sala no encontrada o Error DB");
-    }
-    let state = {};
-    try {
-      state = data.game_state_data ? JSON.parse(data.game_state_data) : {};
-    } catch (e) {
-      console.error("Error parseando estado JSON DB");
-    }
-    const compiled = compileLogic(data.server_logic, state, roomId, io);
-    rooms[roomId] = {
-      state: compiled.state,
-      logic: compiled.userLogic,
-      renderFn: compiled.renderFn,
-      inputQueue: [],
-      players: new Set(),
-      bots: new Map(), // Memoria para bots
-    };
-
-    // GAME LOOP
-    let tickCount = 0;
-    // Log reducido para no saturar la consola
-    if (tickCount % 300 === 0) {
-      // console.log(`[Sala ${roomId}] Estado: Corriendo...`);
-    }
-    rooms[roomId].interval = setInterval(() => {
-      const r = rooms[roomId];
+    let loadedState = {};
+    if (data?.game_state_data)
       try {
-        // LOG DE DIAGNÓSTICO (Muestra 1 mensaje cada ~5 segundos)
-        tickCount++;
-        if (tickCount % 300 === 0) {
-          console.log(
-            `[Sala ${roomId}] Estado: Corriendo. Inputs: ${r.inputQueue.length}`
-          );
-        }
-        // 1. INPUTS
-        while (r.inputQueue.length > 0) {
-          const input = r.inputQueue.shift();
-          // [DEBUG] 3. ¿Se procesa?
-          console.log(
-            "⚡ Procesando Input:",
-            input.type,
-            input.key || input.value
-          );
+        loadedState = JSON.parse(data.game_state_data);
+      } catch (e) {}
 
-          if (r.logic.onInput) {
-            r.logic.onInput(input, r.state);
-          } else {
-            console.error(
-              "❌ ERROR: La lógica no tiene función 'onInput' definida."
-            );
+    if (!rooms[roomId]) {
+      const compiled = compileLogic(
+        data?.server_logic || "",
+        loadedState,
+        roomId
+      );
+      rooms[roomId] = { ...compiled, inputQueue: [] };
+
+      rooms[roomId].interval = setInterval(() => {
+        const r = rooms[roomId];
+        try {
+         
+          // 1. PROCESAR INPUTS
+          while (r.inputQueue.length > 0) {
+            const input = r.inputQueue.shift();
+            // Ahora esto NO será undefined
+            console.log("Procesando input:", input.type, "de", input.id);
+            if (r.userLogic.onInput) r.userLogic.onInput(input, r.state);
           }
-        }
 
-        // 2. GESTIÓN DE BOTS (Restaurado)
-        // A. Spawn
-        if (r.state._sys && r.state._sys.spawnQueue.length > 0) {
-          const q = r.state._sys.spawnQueue;
-          while (q.length > 0) {
-            const req = q.shift();
-            // Usamos ActorFactory para crear el cuerpo físico del Bot
-            // Asumimos que config tiene { type: 'Zombie', x: 0, y: 0 }
-            const type = req.config.type || "Zombie"; // Default fallback
-            const ent = ActorFactory.create(
-              type,
-              req.config.x || 0,
-              req.config.y || 0,
-              { isBot: true, ...req.config },
-              r.state
-            );
-
-            // Registrar en memoria de control
-            r.bots.set(ent.id, { id: ent.id, memory: {} });
+          // 2. PROCESAR SPAWNS DE BOTS
+          while (r.state._sys.spawnQueue.length > 0) {
+            const req = r.state._sys.spawnQueue.shift();
+            r.GameAPI.Actor.create(req.config.type || "Bot", req.config);
           }
-        }
-        // B. Kill
-        if (r.state._sys && r.state._sys.killQueue.length > 0) {
-          const q = r.state._sys.killQueue;
-          while (q.length > 0) {
-            const id = q.shift();
-            r.bots.delete(id);
-            // Buscar y matar entidad en todos los grupos (ineficiente pero seguro)
-            for (const k in r.state) {
-              if (Array.isArray(r.state[k])) {
-                const e = r.state[k].find((x) => x.id === id);
-                if (e) e._dead = true;
-              }
+
+          // 3. UPDATE DE LÓGICA (Usuario)
+          if (r.userLogic.onUpdate) r.userLogic.onUpdate(r.state, 0.016);
+          // B. Lógica individual de cada entidad (MOVIMIENTO REAL)
+          r.allEntities.forEach((ent) => {
+            if (ent.receive) {
+              ent.receive("onUpdate", 0.016);
             }
-          }
+          });
+
+          // 4. EMITIR SOLO EL RENDER STATE (Privacidad asegurada)
+          // r.state se queda en el servidor para la BD.
+          io.to(roomId).emit("render_update", r.renderState);
+        } catch (e) {
+          console.error(`Error en Loop de sala ${roomId}:`, e);
         }
-        // C. Update IA
-        if (r.logic.onBot) {
-          for (const [botId, botCtrl] of r.bots) {
-            // Buscar entidad física
-            let ent = null;
-            // Buscamos en los grupos comunes (optimizable si sabemos el grupo)
-            if (r.state.enemies)
-              ent = r.state.enemies.find((e) => e.id === botId);
-            if (!ent && r.state.players)
-              ent = r.state.players.find((e) => e.id === botId);
-
-            if (ent && !ent._dead) {
-              const action = r.logic.onBot(ent, botCtrl.memory, r.state);
-              if (action && r.logic.onInput) {
-                action.id = botId; // Auto-firmar input
-                r.logic.onInput(action, r.state);
-              }
-            }
-          }
-        }
-
-        // 3. UPDATE GENERAL
-        if (r.logic.onUpdate) r.logic.onUpdate(r.state, 0.016);
-
-        // 4. RENDER
-        if (r.renderFn) {
-          const packet = r.renderFn();
-          // Si el paquete está corrupto, lo limpiamos
-          if (!packet) packet = { g: {}, e: [], fx: [] };
-          io.to(roomId).emit("render_update", packet);
-          r.state.effects = [];
-        } else {
-          console.error(`[ALERTA] Sala ${roomId} no tiene renderFn!`);
-        }
-      } catch (e) {
-        console.error(`Crash en sala ${roomId}:`, e.message);
-      }
-    }, 16);
-
-    const r = rooms[roomId];
-    r.players.add(socket.id);
-    socket.emit("map_data", r.state.bloques || []);
-    console.log(`[+] Jugador conectado a ${roomId}`);
+      }, 16);
+    }
   });
 
-  // --- NUEVO: Protocolo Optimizado (Tick Rate) ---
   socket.on("client_tick", (packet) => {
-    // [DEBUG] 1. ¿Llega el paquete?
-    console.log(`📩 Packet recibido de ${socket.id}:`, JSON.stringify(packet));
-
-    if (!socket.roomId || !rooms[socket.roomId]) {
-      console.warn(`⚠️ Rechazado: Socket ${socket.id} no tiene sala asignada.`);
-      return;
-    }
-
+    if (!socket.roomId || !rooms[socket.roomId]) return;
     const r = rooms[socket.roomId];
-    const playerId = socket.userId || socket.id;
+    const pid = socket.userId || socket.id;
 
-    // 1. Desempaquetar Movimiento (Solo el último importa)
-    if (packet.move) {
-      // Reconstruimos el evento para que la lógica (VM) lo entienda igual que antes
-      r.inputQueue.push({
-        type: "player_move", // El tipo estándar para movimiento
-        ...packet.move, // x, y, rot, etc.
-        id: playerId,
+    console.log("📥 Paquete recibido de cliente ACTIONS:", packet.actions);
+    console.log("----------");
+    console.log("----------");
+
+    // 1. Si el paquete viene con la estructura del ClientEngine (actions[])
+    if (packet.actions && Array.isArray(packet.actions)) {
+      packet.actions.forEach((a) => {
+        // "Aplanamos" el objeto para que el servidor reciba
+        // directamente el tipo y el payload
+        r.inputQueue.push({
+          type: a.type,
+          ...a.payload, // <--- Importante: Metemos el contenido de payload al nivel superior
+          id: pid,
+          timestamp: Date.now(),
+        });
       });
     }
 
-    // 2. Acciones (FIX CRÍTICO AQUÍ)
-    if (packet.actions && Array.isArray(packet.actions)) {
-      for (const action of packet.actions) {
-        // Verificamos si payload es un objeto o un primitivo
-        let data = {};
-        if (action.payload && typeof action.payload === "object") {
-          data = action.payload; // Es objeto, usamos spread
-        } else {
-          data = { value: action.payload }; // Es texto/número, lo envolvemos
+    // 2. Si es un movimiento (packet.move)
+    else if (packet.move) {
+      r.inputQueue.push({
+        type: "player_move",
+        ...packet.move,
+        id: pid,
+      });
+    }
+
+    // C. CORRECCIÓN: Si NO tiene forma (Dato puro o amorfo)
+    if (!packet.move && !packet.actions) {
+      console.log("📦 Procesando paquete amorfo de:", pid);
+
+      // Lo normalizamos como una acción de tipo 'raw'
+      // Esto permite que el onInput del editor lo reciba sin romperse
+      r.inputQueue.push({
+        type: "raw_data",
+        payload: packet, // El dato tal cual llegó
+        id: pid,
+      });
+    }
+
+    // 3. Log de depuración para ver que entró a la cola REAL
+    console.log(`📥 Cola actualizada: ${r.inputQueue.length} items.`);
+    console.log("----------");
+  });
+  // ==================================================================
+  // --- SISTEMA DE LIMPIEZA AUTOMÁTICA (AUTO-HIBERNACIÓN) ---
+  // ==================================================================
+  socket.on("disconnect", () => {
+    const roomId = socket.roomId;
+    if (!roomId || !rooms[roomId]) return;
+
+    // 1. Contar cuántos quedan en la sala
+    // Nota: socket.io a veces tarda ms en actualizar, así que pedimos el tamaño real
+    const roomSockets = io.sockets.adapter.rooms.get(roomId);
+    const numClients = roomSockets ? roomSockets.size : 0;
+
+    console.log(`🔌 Usuario desconectado de ${roomId}. Quedan: ${numClients}`);
+
+    if (numClients === 0) {
+      console.log(
+        `⏳ Sala ${roomId} vacía. Iniciando cuenta atrás para hibernación...`
+      );
+
+      // 2. Damos 10 segundos de gracia por si fue un F5 (recarga)
+      // Guardamos el timeout en el objeto de la sala para poder cancelarlo si alguien entra
+      rooms[roomId].hibernationTimeout = setTimeout(async () => {
+        // Verificación doble por seguridad (¿Entró alguien en estos 10 seg?)
+        const currentSockets = io.sockets.adapter.rooms.get(roomId);
+        if (currentSockets && currentSockets.size > 0) {
+          console.log(
+            `🚫 Hibernación cancelada. Alguien volvió a entrar a ${roomId}.`
+          );
+          return;
         }
-        // [DEBUG] 2. ¿Se encola la acción?
-        console.log(`✅ Encolando acción [${action.type}] para ${playerId}`);
 
-        r.inputQueue.push({
-          type: action.type,
-          ...data, // Ahora data siempre es un objeto seguro
-          id: playerId,
-        });
-      }
+        // --- AHORA SÍ: APAGÓN ---
+        try {
+          const r = rooms[roomId];
+
+          // A. Detener el Loop de Juego (Ahorra CPU)
+          clearInterval(r.interval);
+
+          // B. Guardar Estado final en Supabase (Persistencia)
+          // Nota: Guardamos 'state' (lógica), no renderState
+          const jsonState = JSON.stringify(r.state);
+          await supabase
+            .from("game_rooms")
+            .update({ game_state_data: jsonState })
+            .eq("name", roomId);
+          // AL ELIMINAR EL OBJETO ROOM, EL GARBAGE COLLECTOR DE JS
+          // ELIMINARÁ TAMBIÉN EL 'allEntities' LOCAL Y LAS DEFINICIONES.
+          // ¡LIMPIEZA PERFECTA!
+          delete rooms[roomId];
+          console.log(`💤 Sala ${roomId} eliminada de RAM.`);
+          console.log(`💾 Estado de ${roomId} guardado en DB.`);
+
+                    
+          // 2. Borrar el objeto de la sala completo
+          delete rooms[roomId];
+
+          console.log(
+            `💤 Sala ${roomId} eliminada de la RAM (Hibernación completa).`
+          );
+        } catch (err) {
+          console.error(`❌ Error hibernando sala ${roomId}:`, err);
+        }
+      }, 10000); // 10 segundos de espera
     }
   });
-
-  // --- RESTAURADO: PERSISTENCIA AL SALIR ---
-  socket.on("disconnect", async () => {
-    if (!socket.roomId || !rooms[socket.roomId]) return;
-    const r = rooms[socket.roomId];
-    r.players.delete(socket.id);
-
-    if (r.players.size === 0) {
-      console.log(`[!] Sala ${socket.roomId} vacía. Guardando estado...`);
-      clearInterval(r.interval);
-
-      // 1. Guardar en Supabase
-      try {
-        const jsonState = JSON.stringify(r.state);
-        await supabase
-          .from("game_rooms")
-          .update({ game_state_data: jsonState })
-          .eq("name", socket.roomId);
-        console.log("✅ Estado guardado.");
-      } catch (e) {
-        console.error("❌ Error guardando:", e.message);
-      }
-
-      // 2. Liberar memoria
-      delete rooms[socket.roomId];
-    }
-  });
-
-  // WebRTC
-  socket.on("voice_join", () => {
-    if (socket.roomId)
-      socket.to(socket.roomId).emit("voice_user_joined", socket.id);
-  });
-  socket.on("voice_signal", (p) =>
-    io
-      .to(p.targetId)
-      .emit("voice_signal", { senderId: socket.id, signal: p.signal })
-  );
 });
 
-// Endpoints API
+// ====================================================================
+// --- 5. API PUBLISH (CORREGIDO: EMISIÓN SOCKET) ---
+// ====================================================================
 app.post("/api/publish-room", async (req, res) => {
   const {
     roomId,
@@ -764,6 +672,8 @@ app.post("/api/publish-room", async (req, res) => {
     clientRenderScript,
     clientInputScript,
   } = req.body;
+
+  // 1. Guardar en Base de Datos
   await supabase
     .from("game_rooms")
     .update({
@@ -774,28 +684,73 @@ app.post("/api/publish-room", async (req, res) => {
     })
     .eq("name", roomId);
 
+  // 2. Actualizar Lógica del Servidor en Caliente (Hot Swap)
   if (rooms[roomId]) {
-    const r = rooms[roomId];
-    const c = compileLogic(serverLogic, r.state, roomId, io);
-    r.logic = c.userLogic;
-    r.renderFn = c.renderFn;
-    io.to(roomId).emit("design_update", {
-      structure: clientStructureHtml,
-      renderScript: clientRenderScript,
-      inputScript: clientInputScript,
-    });
+    // Limpieza forzada de memoria
+    rooms[roomId].state = { _sys: { spawnQueue: [] } };
+    rooms[roomId].renderState = {};
+    // Recompilamos manteniendo el State actual para no reiniciar la partida
+    const c = compileLogic(serverLogic, rooms[roomId].state, roomId);
+
+    // Actualizamos las referencias de la sala
+    rooms[roomId].userLogic = c.userLogic;
+    rooms[roomId].GameAPI = c.GameAPI;
+    rooms[roomId].allEntities = c.allEntities; // Actualizamos la referencia al nuevo array vacío
+    // Nota: GameAPI se mantiene o se recrea según necesidad,  lo simplificaaquímos manteniendo el state
+    console.log(`🔥 Sala ${roomId} recargada.`);
   }
+
+  // 3. ACTUALIZAR CLIENTES CONECTADOS (Hot Reload)
+  // Esto es lo que faltaba para que el HTML reciba el evento y llame a injectScripts
+  io.to(roomId).emit("design_update", {
+    structure: clientStructureHtml,
+    renderScript: clientRenderScript,
+    inputScript: clientInputScript,
+  });
+
   res.json({ ok: true });
 });
 
-// Endpoint IA
 app.post("/api/ai/generate", async (req, res) => {
-  const { prompt, model = "gemini-2.5-flash" } = req.body;
   try {
-    const aiModel = genAI.getGenerativeModel({ model });
-    const result = await aiModel.generateContent(prompt);
-    res.send({ success: true, response: result.response.text() });
+    const r = await genAI
+      .getGenerativeModel({ model: req.body.model || "gemini-2.5-flash" })
+      .generateContent(req.body.prompt);
+    res.send({ success: true, response: r.response.text() });
   } catch (e) {
     res.status(500).send({ success: false, error: e.message });
+  }
+});
+// --- Añade este endpoint en tu server.js ---
+
+app.post("/api/reset-room-state", async (req, res) => {
+  
+
+  try {
+    const { roomId } = req.body;
+    // 1. Limpiar en Supabase
+    const { error } = await supabase
+      .from("game_rooms")
+      .update({ game_state_data: {} }) // O "{}" según prefieras
+      .eq("name", roomId);
+
+    if (error) throw error;
+
+    // 2. Limpiar en Memoria (si la sala está abierta)
+    if (rooms[roomId]) {
+      rooms[roomId].state = { _sys: { spawnQueue: [] } };
+      rooms[roomId].renderState = {};
+      // Al vaciar la sala así, técnicamente deberíamos vaciar el allEntities local
+      // La forma más fácil es recompilar (Publish) o iterar sobre rooms[roomId].allEntities y vaciarlo.
+      if(rooms[roomId].allEntities) rooms[roomId].allEntities.length = 0;
+      console.log(
+        `🧹 [SISTEMA] State de sala ${roomId} reseteado por el usuario.`
+      );
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    console.error("Error reseteando sala:", e);
+    res.status(500).json({ error: e.message });
   }
 });
